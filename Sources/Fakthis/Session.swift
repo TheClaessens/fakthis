@@ -63,16 +63,18 @@ public actor Session {
 
     private func submit() async throws {
         guard var draft, draft.key == nil,
-            let issueType = project.ticketTypeMapping[draft.ticketType]
+            let jiraIssueType = project.ticketTypeMapping[draft.ticketType]
         else {
             return
         }
         let key: TicketKey
         do {
             key = try await jira.createTicket(
+                projectKey: project.key,
                 title: draft.title,
                 descriptionWiki: wikiMarkup(from: draft.description),
-                issueType: issueType
+                jiraIssueType: jiraIssueType,
+                parentKey: nil
             )
         } catch is JiraUnreachable {
             return
@@ -83,7 +85,7 @@ public actor Session {
             CatalogRow(
                 key: key,
                 title: draft.title,
-                jiraIssueType: issueType,
+                jiraIssueType: jiraIssueType,
                 shortLabel: draft.shortLabel,
                 ticketType: draft.ticketType
             )

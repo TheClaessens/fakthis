@@ -40,7 +40,7 @@ actor ScriptedModel: Model {
 struct CreatedTicket: Equatable, Sendable {
     var title: String
     var descriptionWiki: String
-    var issueType: String
+    var jiraIssueType: String
 }
 
 struct SeededEpic: Sendable {
@@ -67,6 +67,8 @@ actor FakeJira: Jira {
     var nextKey = TicketKey("FAK-1")
     private(set) var created: [CreatedTicket] = []
     private(set) var catalogPulls: [String] = []
+    private(set) var attachmentPolicyCalls = 0
+    private(set) var uploadAttachmentCalls = 0
     private var seededEpics: [SeededEpic] = []
     private var seededIssues: [SeededIssue] = []
     private var seededComponentNames: [String] = []
@@ -74,14 +76,69 @@ actor FakeJira: Jira {
     private var holdPulls = false
     private var pullWaiters: [CheckedContinuation<Void, Never>] = []
 
-    func createTicket(title: String, descriptionWiki: String, issueType: String) async throws
-        -> TicketKey
+    func createTicket(
+        projectKey: String,
+        title: String,
+        descriptionWiki: String,
+        jiraIssueType: String,
+        parentKey: TicketKey?
+    ) async throws -> TicketKey
     {
         if unreachable { throw JiraUnreachable() }
         created.append(
-            CreatedTicket(title: title, descriptionWiki: descriptionWiki, issueType: issueType)
+            CreatedTicket(
+                title: title,
+                descriptionWiki: descriptionWiki,
+                jiraIssueType: jiraIssueType
+            )
         )
         return nextKey
+    }
+
+    func updateTicket(
+        key: TicketKey,
+        title: String,
+        descriptionWiki: String,
+        completenessMarker: CompletenessMarker
+    ) async throws {
+        if unreachable { throw JiraUnreachable() }
+    }
+
+    func attachmentPolicy() async throws -> AttachmentPolicy {
+        attachmentPolicyCalls += 1
+        if unreachable { throw JiraUnreachable() }
+        return AttachmentPolicy(enabled: true, uploadLimit: 10_485_760)
+    }
+
+    func uploadAttachment(
+        key: TicketKey,
+        filename: String,
+        mimeType: String,
+        data: Data
+    ) async throws {
+        uploadAttachmentCalls += 1
+        if unreachable { throw JiraUnreachable() }
+    }
+
+    func fetchIssueTypes(projectKey: String) async throws -> [JiraIssueType] {
+        if unreachable { throw JiraUnreachable() }
+        return []
+    }
+
+    func fetchRewriteTarget(key: TicketKey) async throws -> RewriteTarget {
+        if unreachable { throw JiraUnreachable() }
+        return RewriteTarget(
+            key: key,
+            title: "",
+            description: "",
+            comments: [],
+            updated: Date(timeIntervalSince1970: 0),
+            jiraIssueType: ""
+        )
+    }
+
+    func createBlocksLink(blocker: TicketKey, blocked: TicketKey) async throws {
+        if unreachable { throw JiraUnreachable() }
     }
 
     func pullCatalog(projectKey: String) async throws -> Catalog {

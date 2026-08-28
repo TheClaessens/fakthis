@@ -2,6 +2,16 @@ import Foundation
 import Testing
 import Fakthis
 
+@Test func submitDoesNotQueryAttachmentPolicyWhenTheDraftHasNoMedia() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    let state = try await harness.session.perform(.submit)
+    #expect(state.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.attachmentPolicyCalls == 0)
+    #expect(await harness.jira.uploadAttachmentCalls == 0)
+}
+
 @Test func afterSubmitLocalInsertKeepsShortLabelAndTypeWhenThePullReturnsTheRowWithoutThem()
     async throws
 {
@@ -509,7 +519,7 @@ import Fakthis
     #expect(created.count == 1)
     let ticket = try #require(created.first)
     #expect(ticket.title == StoryReply.title)
-    #expect(ticket.issueType == "Task")
+    #expect(ticket.jiraIssueType == "Task")
     #expect(ticket.descriptionWiki.contains("*pick screen*"))
     #expect(ticket.descriptionWiki.contains("*bin*"))
     #expect(!ticket.descriptionWiki.contains("**"))

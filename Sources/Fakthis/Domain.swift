@@ -134,3 +134,19 @@ extension Catalog {
         )
     }
 }
+
+extension TicketType {
+    public static func mapping(from jiraIssueTypes: [JiraIssueType]) -> [TicketType: String] {
+        let standard = jiraIssueTypes.filter { !$0.subtask && $0.hierarchyLevel == 0 }
+        let fallback = standard.first?.name ?? "Task"
+        func matchingJiraName(_ name: String) -> String {
+            standard.first { $0.name.compare(name, options: .caseInsensitive) == .orderedSame }?
+                .name ?? fallback
+        }
+        return [
+            .story: matchingJiraName("Story"),
+            .bug: matchingJiraName("Bug"),
+            .chore: matchingJiraName("Chore"),
+        ]
+    }
+}
