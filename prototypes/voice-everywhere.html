@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PROTOTYPE — How does voice-everywhere actually feel?</title>
+  <style>
+    :root {
+      --ink: #1c2430;
+      --muted: #5c6570;
+      --line: #d5d8de;
+      --paper: #f4f5f7;
+      --card: #ffffff;
+      --accent: #c45c26;
+      --listen: #1f6f4a;
+      --think: #2c4f8f;
+      --warn: #8a2f2f;
+      --mono: ui-monospace, "SF Mono", Menlo, monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.45 var(--sans); }
+    body { padding: 28px 20px 80px; }
+    .wrap { max-width: 980px; margin: 0 auto; }
+    h1 { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 8px; }
+    .proto-tag {
+      display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent);
+      padding: 2px 8px; margin-bottom: 12px;
+    }
+    .lede { color: var(--muted); margin: 0 0 22px; max-width: 72ch; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 28px 0 10px; }
+    .card { background: var(--card); border: 1px solid var(--line); padding: 16px 18px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
+    label.choice { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; cursor: pointer; font-size: 14px; }
+    label.choice input { margin-top: 3px; }
+    .hint { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+    .locked { font-size: 12px; color: var(--muted); }
+    .strip {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+      background: var(--line); border: 1px solid var(--line); margin: 8px 0 0;
+    }
+    .lamp {
+      background: #eceef1; padding: 10px 8px; text-align: center; font-size: 12px; font-weight: 650;
+      letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted);
+    }
+    .lamp.on-listen { background: var(--listen); color: #fff; }
+    .lamp.on-transcribe { background: var(--accent); color: #fff; }
+    .lamp.on-think { background: var(--think); color: #fff; }
+    .lamp.on-wait { background: var(--ink); color: #fff; }
+    .stage { margin-top: 8px; }
+    .phase { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+    textarea {
+      width: 100%; min-height: 120px; resize: vertical; font: 15px/1.45 var(--sans);
+      border: 1px solid var(--line); padding: 12px; background: #fff; color: var(--ink);
+    }
+    textarea:focus { outline: 2px solid var(--ink); outline-offset: -1px; }
+    .partial {
+      min-height: 1.45em; font-family: var(--mono); font-size: 13px; color: var(--muted);
+      margin: 8px 0; white-space: pre-wrap;
+    }
+    .partial.live { color: var(--listen); }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    button {
+      font: 13px/1 var(--sans); padding: 8px 12px; border: 1px solid var(--ink);
+      background: #fff; color: var(--ink); cursor: pointer;
+    }
+    button:hover { background: #eceef1; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary { background: var(--ink); color: #fff; }
+    button.primary:hover { background: #000; }
+    button.mic { border-color: var(--listen); color: var(--listen); font-weight: 650; }
+    button.mic.hot { background: var(--listen); color: #fff; }
+    button.danger { border-color: var(--warn); color: var(--warn); }
+    .just { background: #fff7e8; border: 1px solid #ead8a8; padding: 10px 12px; margin-top: 12px; font-size: 14px; }
+    .state-grid { display: grid; grid-template-columns: 180px 1fr; gap: 4px 16px; font-size: 13px; }
+    .state-grid dt { color: var(--muted); }
+    .state-grid dd { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+    .changed dd { background: #fff7e8; }
+    .chat-log { font-size: 14px; margin: 8px 0; }
+    .chat-log .msg { padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .chat-log .who { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+    .tabs button { font-size: 12px; padding: 6px 8px; }
+    .tabs button.active { background: var(--ink); color: #fff; }
+    .scenario p { margin: 0 0 10px; color: var(--muted); }
+    .steps { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+    .steps button.done { opacity: 0.45; text-decoration: line-through; }
+    .steps button.next { border-color: var(--accent); color: var(--accent); font-weight: 650; }
+    .free grid, .takes { display: flex; flex-wrap: wrap; gap: 8px; }
+    .check { margin: 8px 0; }
+    .draft-box { border-left: 3px solid var(--ink); padding: 8px 12px; margin-top: 8px; font-size: 14px; }
+    kbd { font-family: var(--mono); font-size: 12px; border: 1px solid var(--line); padding: 0 4px; background: #fff; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="proto-tag">Throwaway prototype · not the app</div>
+    <h1>How does voice-everywhere actually feel?</h1>
+    <p class="lede">
+      Voice is the fast path into a field you can still type in — never the only path, and never a pipe that fires the agent before you have seen the words.
+      This demo is a state machine, not a transcriber. Canned takes stand in for your voice so the forks are audible as <em>behaviour</em>:
+      hold vs toggle vs voice-activity, batch-with-Project-terms vs streaming-without, preview vs auto-send.
+      Jargon-term recall is the primary metric; global word error is not. Double-click this file. Nothing is saved.
+    </p>
+
+    <h2>Policies under test</h2>
+    <div class="row">
+      <div class="card">
+        <strong>Brain-dump</strong>
+        <p class="hint">Long, latency-tolerant. Project-terms boosting is batch-only, so this tier stays on the batch path.</p>
+        <div id="dump-capture"></div>
+        <p class="locked">Path: batch pass with the Project-terms list. Commit: the take lands in the field; Generate is a separate act.</p>
+      </div>
+      <div class="card">
+        <strong>Chat answers</strong>
+        <p class="hint">Short, fragile. Streaming cannot carry the Project-terms list. Auto-send cannot be unsaid.</p>
+        <div id="chat-capture"></div>
+        <div id="chat-path"></div>
+        <div id="chat-commit"></div>
+        <label class="choice check"><input type="checkbox" id="terms-empty" /> Project terms are empty (biasing off)</label>
+      </div>
+    </div>
+
+    <h2>The strip — listening, transcribing, thinking, waiting. No sound.</h2>
+    <div class="card">
+      <div class="strip" id="strip"></div>
+      <p class="phase" id="phase-label"></p>
+
+      <div class="stage">
+        <div class="chat-log" id="log"></div>
+        <div id="question"></div>
+        <div class="partial" id="partial"></div>
+        <textarea id="field" placeholder="Type, or speak into this field."></textarea>
+        <div class="actions" id="main-actions"></div>
+        <div class="just" id="just"></div>
+      </div>
+    </div>
+
+    <h2>Full state</h2>
+    <div class="card"><dl class="state-grid" id="state-panel"></dl></div>
+
+    <h2>Free play</h2>
+    <div class="card">
+      <p class="hint">Gestures follow the policies above. Space is push-to-talk when that capture is selected and the field is not focused.</p>
+      <div class="actions" id="gestures"></div>
+      <p class="hint" style="margin-top:14px">Canned takes — what the mic “hears”, scored the way the live transcriber would under the current path.</p>
+      <div class="takes" id="takes"></div>
+    </div>
+
+    <h2>Guided walkthroughs</h2>
+    <div class="card">
+      <div class="tabs" id="tabs"></div>
+      <div class="scenario" id="scenario"></div>
+    </div>
+  </div>
+
+  <script>
+    /* ============================================================
+       Portable module. No DOM. The page calls in; nothing flows out.
+       Question: two-tier voice into a typed field — capture, path,
+       commit, correction — without sending the agent unreviewed text.
+       ============================================================ */
+    const CAPTURE = {
+      ptt: "Push-to-talk (hold)",
+      toggle: "Toggle (press to start, press to stop)",
+      vad: "Voice-activity (starts and stops itself)",
+    };
+    const PATH = {
+      batch: "Batch pass with the Project-terms list",
+      stream: "Streaming — the Project-terms list does not apply",
+    };
+    const COMMIT = {
+      preview: "Land in the field, then send",
+      auto: "Send as soon as the take ends",
+    };
+
+    const TAKES = {
+      dumpHappy: {
+        label: "Brain-dump with SM-A-rt, AIB, and a self-correction",
+        tier: "dump",
+        spoken: "A four-minute dump, Dutch/English mixed, thinking pauses in it.",
+        raw: "we moeten de smart pagina refactoren zodat de aib table niet meer crasht. no wait, actually het is de monster lijst die crashed, de aib table is fine. epic is FAK something, the catalog one.",
+        boosted: "we moeten de SM-A-rt pagina refactoren zodat de AIB table niet meer crasht. no wait, actually het is de monster lijst die crashed, de AIB table is fine. epic is FAK something, the Catalog one.",
+        stream: "we moeten de smart pagina refactoren zodat de aib table niet meer crasht. no wait, actually het is de monster lijst die crashed, de aib table is fine. epic is FAK something, the catalog one.",
+        jargon: ["SM-A-rt", "AIB"],
+        batchMs: 2600,
+      },
+      dumpPause: {
+        label: "Brain-dump that pauses mid-thought",
+        tier: "dump",
+        spoken: "You stop to think for two seconds in the middle of a sentence.",
+        raw: "de export moet",
+        boosted: "de export moet",
+        stream: "de export moet",
+        jargon: [],
+        batchMs: 900,
+        cutEarly: true,
+      },
+      dumpRest: {
+        label: "The rest of that thought (after the pause)",
+        tier: "dump",
+        spoken: "You finish the sentence the pause interrupted.",
+        raw: "de aib table meenemen in de csv",
+        boosted: "de AIB table meenemen in de csv",
+        stream: "de aib table meenemen in de csv",
+        jargon: ["AIB"],
+        batchMs: 1200,
+      },
+      chatYes: {
+        label: "Short answer: ja, de AIB table",
+        tier: "chat",
+        spoken: "Two seconds. The fragile tier.",
+        raw: "ja de aib table",
+        boosted: "ja de AIB table",
+        stream: "ja de aib table",
+        jargon: ["AIB"],
+        batchMs: 1400,
+      },
+      chatSmart: {
+        label: "Short answer: SM-A-rt (the jargon fork)",
+        tier: "chat",
+        spoken: "The noun the ticket template must preserve verbatim.",
+        raw: "smart",
+        boosted: "SM-A-rt",
+        stream: "smart",
+        jargon: ["SM-A-rt"],
+        batchMs: 1200,
+      },
+      chatWrongLang: {
+        label: "Short answer that flips language",
+        tier: "chat",
+        spoken: "Ambiguous two-second clip. Boosting cannot save a wrong-language take.",
+        raw: "yes the table",
+        boosted: "yes the table",
+        stream: "yes the table",
+        jargon: [],
+        batchMs: 1100,
+        wrongLang: true,
+      },
+      chatOneWord: {
+        label: "One word: ja",
+        tier: "chat",
+        spoken: "The shortest thing the design leans on.",
+        raw: "ja",
+        boosted: "ja",
+        stream: "yeah",
+        jargon: [],
+        batchMs: 900,
+      },
+    };
+
+    function recommendedPolicies() {
+      return {
+        dumpCapture: "toggle",
+        chatCapture: "ptt",
+        chatPath: "batch",
+        chatCommit: "preview",
+        termsEmpty: false,
+      };
+    }
+
+    function initialState(policies) {
+      const p = { ...recommendedPolicies(), ...policies };
+      return {
+        ...p,
+        phase: "dump",
+        mic: "idle",
+        agent: "waiting",
+        field: "",
+        partial: "",
+        lastChange: "Ready. The field is the thing you speak into; Generate is a later act.",
+        lastBoosted: null,
+        lastJargon: [],
+        lastPath: null,
+        pendingTake: null,
+        listeningVia: null,
+        agentQuestion: null,
+        messages: [],
+        draft: null,
+        takeCount: 0,
+      };
+    }
+
+    function currentCapture(s) {
+      return s.phase === "chat" ? s.chatCapture : s.dumpCapture;
+    }
+
+    function currentPath(s) {
+      return s.phase === "chat" ? s.chatPath : "batch";
+    }
+
+    function boostingOn(s) {
+      if (s.termsEmpty) return false;
+      return currentPath(s) === "batch";
+    }
+
+    function textForTake(s, take) {
+      if (currentPath(s) === "stream") return take.stream;
+      if (s.termsEmpty) return take.raw;
+      return take.boosted;
+    }
+
+    function jargonRecall(take, text) {
+      return take.jargon.map((term) => ({
+        term,
+        hit: text.includes(term),
+      }));
+    }
+
+    function lamp(s) {
+      if (s.mic === "listening") return "listen";
+      if (s.mic === "transcribing") return "transcribe";
+      if (s.agent === "thinking") return "think";
+      return "wait";
+    }
+
+    function canStart(s) {
+      return s.mic === "idle" && s.agent !== "thinking" && !s.draft;
+    }
+
+    function reduce(state, action) {
+      const s = { ...state, lastJargon: state.lastJargon ? [...state.lastJargon] : [], messages: state.messages.map((m) => ({ ...m })) };
+      switch (action.type) {
+        case "SET_POLICY": {
+          if (s.mic !== "idle") return state;
+          return { ...s, [action.key]: action.value, lastChange: "Policy changed. Takes from here on follow the new shape." };
+        }
+        case "RESET":
+          return initialState(action.policies || recommendedPolicies());
+        case "EDIT": {
+          if (s.mic !== "idle" || s.agent === "thinking") return state;
+          return { ...s, field: action.value, lastChange: "You typed. Voice never owns this field." };
+        }
+        case "MIC_DOWN": {
+          if (!canStart(s)) return state;
+          if (currentCapture(s) !== "ptt") return state;
+          return {
+            ...s,
+            mic: "listening",
+            listeningVia: "ptt",
+            partial: "",
+            lastChange: "Holding. The take runs until you release.",
+          };
+        }
+        case "MIC_UP": {
+          if (s.mic !== "listening" || s.listeningVia !== "ptt") return state;
+          return finishListening(s, "Released.");
+        }
+        case "TOGGLE_MIC": {
+          if (currentCapture(s) !== "toggle") return state;
+          if (s.mic === "listening" && s.listeningVia === "toggle") {
+            return finishListening(s, "Toggle off. End of take.");
+          }
+          if (!canStart(s)) return state;
+          return {
+            ...s,
+            mic: "listening",
+            listeningVia: "toggle",
+            partial: "",
+            lastChange: "Toggle on. Speak; press again to end the take.",
+          };
+        }
+        case "VAD_START": {
+          if (currentCapture(s) !== "vad") return state;
+          if (!canStart(s)) return state;
+          return {
+            ...s,
+            mic: "listening",
+            listeningVia: "vad",
+            partial: "",
+            lastChange: "Voice-activity heard speech. It will also decide that you have stopped.",
+          };
+        }
+        case "VAD_SILENCE": {
+          if (s.mic !== "listening" || s.listeningVia !== "vad") return state;
+          return finishListening(s, "Voice-activity heard silence. Take ended without you.");
+        }
+        case "HEAR": {
+          const take = TAKES[action.id];
+          if (!take) return state;
+          if (s.mic !== "listening") return state;
+          const path = currentPath(s);
+          if (path === "stream") {
+            return {
+              ...s,
+              pendingTake: action.id,
+              partial: take.stream.slice(0, Math.min(18, take.stream.length)) + " …",
+              lastChange: "Streaming partials. The Project-terms list is not on this path.",
+            };
+          }
+          return {
+            ...s,
+            pendingTake: action.id,
+            lastChange: "Heard a take. It sits in the buffer until you end listening; the batch pass runs after that.",
+          };
+        }
+        case "STREAM_PARTIAL": {
+          if (s.mic !== "listening" || currentPath(s) !== "stream") return state;
+          return { ...s, partial: action.value };
+        }
+        case "BEGIN_TRANSCRIBE": {
+          if (s.mic !== "listening") return state;
+          const take = TAKES[s.pendingTake];
+          const path = currentPath(s);
+          if (path === "stream") {
+            return applyTranscript(s, take, "Streaming finalized. Still no Project-terms list.");
+          }
+          return {
+            ...s,
+            mic: "transcribing",
+            listeningVia: null,
+            lastChange: s.termsEmpty
+              ? "Batch pass running. Project terms are empty, so biasing is off."
+              : "Batch pass running, with the Project-terms list.",
+          };
+        }
+        case "TRANSCRIPT_READY": {
+          if (s.mic !== "transcribing") return state;
+          const take = TAKES[s.pendingTake];
+          return applyTranscript(s, take, s.termsEmpty
+            ? "Transcript landed. Biasing was off."
+            : "Transcript landed. Check whether SM-A-rt and AIB survived.");
+        }
+        case "SEND": {
+          if (s.mic !== "idle" || !s.field.trim()) return state;
+          if (s.phase === "dump") {
+            return {
+              ...s,
+              phase: "chat",
+              agent: "thinking",
+              field: "",
+              lastChange: "Generate. The brain-dump left the field; the agent is writing a Draft.",
+              messages: [...s.messages, { who: "You", text: s.field.trim() }],
+            };
+          }
+          const text = s.field.trim();
+          return {
+            ...s,
+            agent: "thinking",
+            field: "",
+            lastChange: "Sent to the agent. A wrong-language take can no longer be edited in the field.",
+            messages: [...s.messages, { who: "You", text }],
+          };
+        }
+        case "AGENT_ASKS": {
+          if (s.agent !== "thinking") return state;
+          const q = action.question || "Is this the SM-A-rt page, or the monster list?";
+          return {
+            ...s,
+            agent: "asked",
+            agentQuestion: q,
+            lastChange: "The agent asked. Your turn — speak or type the answer.",
+            messages: [...s.messages, { who: "Agent", text: q }],
+          };
+        }
+        case "AGENT_DRAFT": {
+          if (s.agent !== "thinking") return state;
+          return {
+            ...s,
+            agent: "waiting",
+            phase: "draft",
+            draft: action.draft || "Short label: SM-A-rt crash on empty supplier\n\nBug. The SM-A-rt page crashes when the supplier is empty. Steps and expected/actual still need your Scope if they were not in the dump.",
+            lastChange: "A Draft is on screen. Voice is done unless you keep chatting.",
+          };
+        }
+        case "CLEAR_TAKE": {
+          if (s.mic !== "idle") return state;
+          return { ...s, field: "", lastChange: "Cleared the field. Re-speak is just another take into an empty field." };
+        }
+        default:
+          return state;
+      }
+    }
+
+    function finishListening(s, why) {
+      if (!s.pendingTake) {
+        return {
+          ...s,
+          mic: "idle",
+          listeningVia: null,
+          partial: "",
+          lastChange: why + " Nothing was in the buffer — a silence, not a take.",
+        };
+      }
+      return reduce(s, { type: "BEGIN_TRANSCRIBE" });
+    }
+
+    function applyTranscript(s, take, why) {
+      if (!take) {
+        return {
+          ...s,
+          mic: "idle",
+          pendingTake: null,
+          partial: "",
+          listeningVia: null,
+          lastChange: why + " (no take)",
+        };
+      }
+      const text = textForTake(s, take);
+      const recall = jargonRecall(take, text);
+      const nextField = s.phase === "dump" && s.field.trim()
+        ? s.field.replace(/\s*$/, "") + " " + text
+        : text;
+      const auto = s.phase === "chat" && s.chatCommit === "auto";
+      const after = {
+        ...s,
+        mic: "idle",
+        pendingTake: null,
+        partial: "",
+        listeningVia: null,
+        field: nextField,
+        lastBoosted: boostingOn(s),
+        lastJargon: recall,
+        lastPath: currentPath(s),
+        takeCount: s.takeCount + 1,
+        lastChange: why + (take.wrongLang ? " This take flipped language; the list cannot unflip it." : ""),
+      };
+      if (auto) return reduce(after, { type: "SEND" });
+      return after;
+    }
+
+    window.VoiceEverywhere = { CAPTURE, PATH, COMMIT, TAKES, recommendedPolicies, initialState, reduce, currentCapture, currentPath, boostingOn, lamp, canStart };
+  </script>
+
+  <script>
+    /* Page shell. Timers and DOM live here, not in the module. */
+    const V = window.VoiceEverywhere;
+    let state = V.initialState();
+    const timers = [];
+
+    function later(ms, fn) {
+      const id = setTimeout(() => { fn(); }, ms);
+      timers.push(id);
+      return id;
+    }
+    function clearTimers() {
+      while (timers.length) clearTimeout(timers.pop());
+    }
+
+    function dispatch(action) {
+      const prev = state;
+      state = V.reduce(state, action);
+      if (state !== prev) render();
+      return state;
+    }
+
+    function playTake(id) {
+      const take = V.TAKES[id];
+      if (!take) return;
+      if (state.phase === "draft") {
+        dispatch({ type: "RESET" });
+      }
+      if (take.tier === "chat" && state.phase === "dump") {
+        /* A chat take only makes sense once the agent has asked. Leave it; the button still injects into the current field. */
+      }
+      const capture = V.currentCapture(state);
+      if (state.mic === "idle") {
+        if (capture === "ptt") dispatch({ type: "MIC_DOWN" });
+        else if (capture === "toggle") dispatch({ type: "TOGGLE_MIC" });
+        else dispatch({ type: "VAD_START" });
+      }
+      dispatch({ type: "HEAR", id });
+      const path = V.currentPath(state);
+      if (path === "stream") {
+        const full = take.stream;
+        const chunks = [0.3, 0.55, 0.8, 1].map((p) => full.slice(0, Math.max(1, Math.floor(full.length * p))));
+        chunks.forEach((value, i) => {
+          later(180 * (i + 1), () => dispatch({ type: "STREAM_PARTIAL", value }));
+        });
+        later(180 * chunks.length + 200, () => endListen(take));
+      } else {
+        later(280, () => endListen(take));
+      }
+    }
+
+    function maybeFollowAgent() {
+      if (state.agent !== "thinking") return;
+      later(1600, () => {
+        if (state.agent !== "thinking") return;
+        const agentHasSpoken = state.messages.some((m) => m.who === "Agent");
+        if (!agentHasSpoken) dispatch({ type: "AGENT_ASKS" });
+        else dispatch({ type: "AGENT_DRAFT" });
+      });
+    }
+
+    function endListen(take) {
+      const capture = V.currentCapture(state);
+      if (state.mic !== "listening") return;
+      if (capture === "ptt") dispatch({ type: "MIC_UP" });
+      else if (capture === "toggle") dispatch({ type: "TOGGLE_MIC" });
+      else dispatch({ type: "VAD_SILENCE" });
+      if (state.mic === "transcribing") {
+        const ms = (take && take.batchMs) || 1200;
+        later(ms, () => {
+          dispatch({ type: "TRANSCRIPT_READY" });
+          maybeFollowAgent();
+        });
+      } else {
+        maybeFollowAgent();
+      }
+    }
+
+    function radios(container, name, options, current, key) {
+      container.innerHTML = Object.entries(options).map(([value, label]) => `
+        <label class="choice">
+          <input type="radio" name="${name}" value="${value}" ${current === value ? "checked" : ""} />
+          <span>${label}</span>
+        </label>`).join("");
+      container.querySelectorAll("input").forEach((el) => {
+        el.addEventListener("change", () => dispatch({ type: "SET_POLICY", key, value: el.value }));
+      });
+    }
+
+    function renderStrip() {
+      const on = V.lamp(state);
+      const labels = [
+        ["listen", "Listening"],
+        ["transcribe", "Transcribing"],
+        ["think", "Agent thinking"],
+        ["wait", "Your turn"],
+      ];
+      document.getElementById("strip").innerHTML = labels.map(([id, lab]) => {
+        const cls = id === "listen" ? "on-listen" : id === "transcribe" ? "on-transcribe" : id === "think" ? "on-think" : "on-wait";
+        return `<div class="lamp ${on === id ? cls : ""}">${lab}</div>`;
+      }).join("");
+    }
+
+    function render() {
+      radios(document.getElementById("dump-capture"), "dumpCapture", V.CAPTURE, state.dumpCapture, "dumpCapture");
+      radios(document.getElementById("chat-capture"), "chatCapture", V.CAPTURE, state.chatCapture, "chatCapture");
+      radios(document.getElementById("chat-path"), "chatPath", V.PATH, state.chatPath, "chatPath");
+      radios(document.getElementById("chat-commit"), "chatCommit", V.COMMIT, state.chatCommit, "chatCommit");
+      const terms = document.getElementById("terms-empty");
+      terms.checked = state.termsEmpty;
+      terms.onchange = () => dispatch({ type: "SET_POLICY", key: "termsEmpty", value: terms.checked });
+
+      renderStrip();
+
+      const phase = {
+        dump: "Composing the brain-dump. Generate is still yours to press.",
+        chat: state.agentQuestion ? "Answering the agent." : "In the chat.",
+        draft: "A Draft is on screen.",
+      }[state.phase];
+      document.getElementById("phase-label").textContent = phase;
+
+      const log = document.getElementById("log");
+      log.innerHTML = state.messages.map((m) => `<div class="msg"><div class="who">${m.who}</div>${escapeHtml(m.text)}</div>`).join("");
+      const q = document.getElementById("question");
+      q.innerHTML = state.draft ? `<div class="draft-box">${escapeHtml(state.draft)}</div>` : "";
+
+      const partial = document.getElementById("partial");
+      partial.className = "partial" + (state.mic === "listening" && state.partial ? " live" : "");
+      if (state.mic === "listening") {
+        partial.textContent = state.partial || (V.currentPath(state) === "stream" ? "Streaming…" : "Listening. The batch pass has not started.");
+      } else if (state.mic === "transcribing") {
+        partial.textContent = state.termsEmpty
+          ? "Batch pass… biasing off (empty Project terms)."
+          : "Batch pass… Project-terms list is on.";
+      } else {
+        partial.textContent = "";
+      }
+
+      const field = document.getElementById("field");
+      if (document.activeElement !== field) field.value = state.field;
+      field.disabled = state.mic !== "idle" || state.agent === "thinking" || !!state.draft;
+
+      const sendLabel = state.phase === "dump" ? "Generate" : "Send answer";
+      const listening = state.mic === "listening";
+      const capture = V.currentCapture(state);
+      document.getElementById("main-actions").innerHTML = `
+        <button class="mic ${listening ? "hot" : ""}" id="mic-btn" ${state.agent === "thinking" || state.draft ? "disabled" : ""}">${
+          listening ? (capture === "ptt" ? "Release" : capture === "toggle" ? "Stop" : "Listening…") : (capture === "ptt" ? "Hold to speak" : capture === "toggle" ? "Start listening" : "Wait for speech")
+        }</button>
+        <button class="primary" id="send-btn" ${state.mic !== "idle" || !state.field.trim() || state.agent === "thinking" || state.draft ? "disabled" : ""}">${sendLabel}</button>
+        <button class="danger" id="clear-btn" ${state.mic !== "idle" || !state.field || state.draft ? "disabled" : ""}">Clear field (re-speak)</button>
+        <button id="reset-btn">Reset demo</button>
+      `;
+      wireMic(document.getElementById("mic-btn"));
+      document.getElementById("send-btn").onclick = () => {
+        dispatch({ type: "SEND" });
+        maybeFollowAgent();
+      };
+      document.getElementById("clear-btn").onclick = () => dispatch({ type: "CLEAR_TAKE" });
+      document.getElementById("reset-btn").onclick = () => { clearTimers(); dispatch({ type: "RESET" }); };
+
+      document.getElementById("just").textContent = state.lastChange;
+
+      const recall = (state.lastJargon || []).map((j) => `${j.term}: ${j.hit ? "kept" : "lost"}`).join(", ") || "—";
+      const rows = [
+        ["Where", state.phase === "dump" ? "Brain-dump field" : state.phase === "chat" ? "Chat answer" : "Draft on screen"],
+        ["Mic", state.mic],
+        ["Agent", state.agent],
+        ["This take's path", state.lastPath || "—"],
+        ["Project-terms list on this take", state.lastBoosted === null ? "—" : state.lastBoosted ? "yes" : "no"],
+        ["Jargon-term recall (primary metric)", recall],
+        ["Chat commit policy", V.COMMIT[state.chatCommit]],
+        ["Takes so far", String(state.takeCount)],
+        ["Field", state.field || "(empty)"],
+      ];
+      document.getElementById("state-panel").innerHTML = rows.map(([k, v], i) => {
+        const changed = i === 0 ? "" : "";
+        return `<dt>${k}</dt><dd class="${changed}">${escapeHtml(String(v))}</dd>`;
+      }).join("");
+
+      renderGestures();
+      renderTakes();
+      renderWalkthrough();
+    }
+
+    function wireMic(btn) {
+      const capture = V.currentCapture(state);
+      if (capture === "ptt") {
+        btn.onmousedown = (e) => { e.preventDefault(); dispatch({ type: "MIC_DOWN" }); };
+        btn.onmouseup = () => dispatch({ type: "MIC_UP" });
+        btn.onmouseleave = () => { if (state.mic === "listening" && state.listeningVia === "ptt") dispatch({ type: "MIC_UP" }); };
+      } else if (capture === "toggle") {
+        btn.onclick = () => dispatch({ type: "TOGGLE_MIC" });
+      } else {
+        btn.onclick = () => {
+          if (state.mic === "idle") dispatch({ type: "VAD_START" });
+          else dispatch({ type: "VAD_SILENCE" });
+        };
+      }
+    }
+
+    function renderGestures() {
+      const el = document.getElementById("gestures");
+      const capture = V.currentCapture(state);
+      const idle = state.mic === "idle";
+      el.innerHTML = `
+        <button ${capture !== "vad" || !idle ? "disabled" : ""} id="g-vad-start">Simulate speech start (VAD)</button>
+        <button ${capture !== "vad" || state.mic !== "listening" ? "disabled" : ""} id="g-vad-stop">Simulate silence (VAD)</button>
+      `;
+      document.getElementById("g-vad-start").onclick = () => dispatch({ type: "VAD_START" });
+      document.getElementById("g-vad-stop").onclick = () => dispatch({ type: "VAD_SILENCE" });
+    }
+
+    function renderTakes() {
+      const el = document.getElementById("takes");
+      el.innerHTML = Object.entries(V.TAKES).map(([id, t]) =>
+        `<button data-take="${id}" ${state.agent === "thinking" || state.draft ? "disabled" : ""}>${t.label}</button>`
+      ).join("");
+      el.querySelectorAll("button").forEach((b) => {
+        b.onclick = () => { clearTimers(); playTake(b.dataset.take); };
+      });
+    }
+
+    const SCENARIOS = [
+      {
+        id: "happy",
+        name: "A. Recommended shape",
+        blurb: "Toggle on the brain-dump (you cannot hold a key for four minutes). Batch pass with the Project-terms list. The take lands in the field; you press Generate. Chat answers are push-to-talk, same batch path, same preview. Keyboard was available the whole time.",
+        policies: { dumpCapture: "toggle", chatCapture: "ptt", chatPath: "batch", chatCommit: "preview", termsEmpty: false },
+        steps: [
+          { label: "Reset into the recommended policies", run: () => dispatch({ type: "RESET", policies: { dumpCapture: "toggle", chatCapture: "ptt", chatPath: "batch", chatCommit: "preview", termsEmpty: false } }) },
+          { label: "Speak the dump — SM-A-rt, AIB, “no wait, actually…”", run: () => playTake("dumpHappy") },
+          { label: "Read the field. Self-correction is still there. Generate.", run: () => { dispatch({ type: "SEND" }); later(1600, () => dispatch({ type: "AGENT_ASKS" })); } },
+          { label: "Answer: “ja, de AIB table” (hold-to-talk, batch, preview)", run: () => playTake("chatYes") },
+          { label: "Send the answer", run: () => { dispatch({ type: "SEND" }); later(1600, () => dispatch({ type: "AGENT_DRAFT" })); } },
+        ],
+      },
+      {
+        id: "fork",
+        name: "B. The boosting fork",
+        blurb: "Same two-second “SM-A-rt”. First through streaming (list cannot ride along). Then through the batch pass. Jargon-term recall is the whole question — look at the state panel, not at how fast it felt.",
+        policies: { dumpCapture: "toggle", chatCapture: "ptt", chatPath: "stream", chatCommit: "preview", termsEmpty: false },
+        steps: [
+          { label: "Jump to chat, streaming, preview", run: () => {
+            const p = { dumpCapture: "toggle", chatCapture: "ptt", chatPath: "stream", chatCommit: "preview", termsEmpty: false };
+            let s = V.initialState(p);
+            s = V.reduce(s, { type: "EDIT", value: "(brain-dump already sent)" });
+            s = V.reduce(s, { type: "SEND" });
+            s = V.reduce(s, { type: "AGENT_ASKS", question: "Which page — SM-A-rt or monster?" });
+            state = s; render();
+          } },
+          { label: "Speak “SM-A-rt” on the streaming path", run: () => playTake("chatSmart") },
+          { label: "Switch this chat to the batch path", run: () => dispatch({ type: "SET_POLICY", key: "chatPath", value: "batch" }) },
+          { label: "Clear the field and speak the same word again", run: () => { dispatch({ type: "CLEAR_TAKE" }); later(200, () => playTake("chatSmart")); } },
+        ],
+      },
+      {
+        id: "vad-cut",
+        name: "C. VAD cuts a thinking pause",
+        blurb: "Voice-activity on a long dump. You pause mid-sentence. The take ends without you. The rest of the thought is a second take, or it is gone.",
+        policies: { dumpCapture: "vad", chatCapture: "ptt", chatPath: "batch", chatCommit: "preview", termsEmpty: false },
+        steps: [
+          { label: "Reset with VAD on the brain-dump", run: () => dispatch({ type: "RESET", policies: { dumpCapture: "vad", chatCapture: "ptt", chatPath: "batch", chatCommit: "preview", termsEmpty: false } }) },
+          { label: "Start speaking, then pause…", run: () => playTake("dumpPause") },
+          { label: "Finish the sentence as a second take", run: () => playTake("dumpRest") },
+        ],
+      },
+      {
+        id: "autosend",
+        name: "D. Wrong-language, already sent",
+        blurb: "Short answer, voice-activity, auto-send, streaming. The take flips to English. There is no field left to edit. You would have to tell the agent you meant something else — after it has already spent a turn on the wrong nouns.",
+        policies: { dumpCapture: "toggle", chatCapture: "vad", chatPath: "stream", chatCommit: "auto", termsEmpty: false },
+        steps: [
+          { label: "Jump to chat with VAD + stream + auto-send", run: () => {
+            const p = { dumpCapture: "toggle", chatCapture: "vad", chatPath: "stream", chatCommit: "auto", termsEmpty: false };
+            let s = V.initialState(p);
+            s = V.reduce(s, { type: "EDIT", value: "(brain-dump already sent)" });
+            s = V.reduce(s, { type: "SEND" });
+            s = V.reduce(s, { type: "AGENT_ASKS", question: "Is this about the AIB table?" });
+            state = s; render();
+          } },
+          { label: "Speak the ambiguous two-second clip", run: () => playTake("chatWrongLang") },
+        ],
+      },
+      {
+        id: "typeover",
+        name: "E. Type over a bad take, then Generate",
+        blurb: "The keyboard stays fully available. Correction of a mistranscription is editing the field, not a special “fix this” mode and not asking the agent to guess what you said.",
+        policies: { dumpCapture: "toggle", chatCapture: "ptt", chatPath: "batch", chatCommit: "preview", termsEmpty: false },
+        steps: [
+          { label: "Reset", run: () => dispatch({ type: "RESET" }) },
+          { label: "Speak a dump that loses SM-A-rt because Project terms are empty", run: () => {
+            dispatch({ type: "SET_POLICY", key: "termsEmpty", value: true });
+            later(50, () => playTake("dumpHappy"));
+          } },
+          { label: "Type the nouns back yourself, then Generate", run: () => {
+            const fixed = state.field.replace(/smart/g, "SM-A-rt").replace(/aib/g, "AIB");
+            dispatch({ type: "EDIT", value: fixed });
+            later(400, () => { dispatch({ type: "SEND" }); later(1600, () => dispatch({ type: "AGENT_DRAFT" })); });
+          } },
+        ],
+      },
+      {
+        id: "keyboard",
+        name: "F. Keyboard only",
+        blurb: "Never touch the mic. Voice is the fast path, not the only path. The field, Generate, and the chat are the same objects.",
+        policies: { dumpCapture: "toggle", chatCapture: "ptt", chatPath: "batch", chatCommit: "preview", termsEmpty: false },
+        steps: [
+          { label: "Reset", run: () => dispatch({ type: "RESET" }) },
+          { label: "Type a brain-dump (no mic)", run: () => dispatch({ type: "EDIT", value: "De SM-A-rt pagina crasht als de supplier leeg is. Dit is de monster lijst, niet de AIB table." }) },
+          { label: "Generate", run: () => { dispatch({ type: "SEND" }); later(1600, () => dispatch({ type: "AGENT_ASKS", question: "Reproduction steps?" })); } },
+          { label: "Type the answer", run: () => dispatch({ type: "EDIT", value: "Open SM-A-rt, kies geen supplier, druk save." }) },
+          { label: "Send", run: () => { dispatch({ type: "SEND" }); later(1600, () => dispatch({ type: "AGENT_DRAFT" })); } },
+        ],
+      },
+    ];
+
+    let activeScenario = 0;
+    let stepIndex = 0;
+
+    function renderWalkthrough() {
+      const tabs = document.getElementById("tabs");
+      tabs.innerHTML = SCENARIOS.map((sc, i) =>
+        `<button class="${i === activeScenario ? "active" : ""}" data-i="${i}">${sc.name}</button>`
+      ).join("");
+      tabs.querySelectorAll("button").forEach((b) => {
+        b.onclick = () => {
+          activeScenario = Number(b.dataset.i);
+          stepIndex = 0;
+          clearTimers();
+          const sc = SCENARIOS[activeScenario];
+          dispatch({ type: "RESET", policies: sc.policies });
+          renderWalkthrough();
+        };
+      });
+      const sc = SCENARIOS[activeScenario];
+      const box = document.getElementById("scenario");
+      const busy = state.mic !== "idle" || state.agent === "thinking";
+      box.innerHTML = `<p>${sc.blurb}</p><div class="steps">${
+        sc.steps.map((st, i) => {
+          const cls = i < stepIndex ? "done" : i === stepIndex ? "next" : "";
+          const wait = i === stepIndex && busy;
+          return `<button class="${cls}" data-step="${i}"${wait ? " disabled" : ""}>${i + 1}. ${st.label}${wait ? " — wait" : ""}</button>`;
+        }).join("")
+      }</div>`;
+      box.querySelectorAll("button").forEach((b) => {
+        b.onclick = () => {
+          const i = Number(b.dataset.step);
+          if (i !== stepIndex) return;
+          sc.steps[i].run();
+          stepIndex += 1;
+          renderWalkthrough();
+        };
+      });
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    document.getElementById("field").addEventListener("input", (e) => {
+      dispatch({ type: "EDIT", value: e.target.value });
+    });
+
+    window.addEventListener("keydown", (e) => {
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable) return;
+      if (e.code === "Space" && V.currentCapture(state) === "ptt") {
+        e.preventDefault();
+        if (state.mic === "idle") dispatch({ type: "MIC_DOWN" });
+      }
+    });
+    window.addEventListener("keyup", (e) => {
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable) return;
+      if (e.code === "Space" && V.currentCapture(state) === "ptt") {
+        e.preventDefault();
+        if (state.mic === "listening") dispatch({ type: "MIC_UP" });
+      }
+    });
+
+    render();
+  </script>
+</body>
+</html>
