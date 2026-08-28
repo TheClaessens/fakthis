@@ -3,3 +3,5 @@
 .scratch/
 
 .DS_Store
+.build/
+.swiftpm/
