@@ -29,6 +29,7 @@ public protocol Model: Sendable {
 public protocol Jira: Sendable {
     func createTicket(title: String, descriptionWiki: String, issueType: String) async throws
         -> TicketKey
+    func pullCatalog(projectKey: String) async throws -> Catalog
 }
 
 public struct JiraUnreachable: Error {

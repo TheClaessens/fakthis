@@ -2,6 +2,361 @@ import Foundation
 import Testing
 import Fakthis
 
+@Test func afterSubmitLocalInsertKeepsShortLabelAndTypeWhenThePullReturnsTheRowWithoutThem()
+    async throws
+{
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date().addingTimeInterval(-3601),
+        epics: [],
+        rows: [],
+        componentNames: []
+    )
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-1",
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_200),
+                body: "Jira has the issue and no Fakthis fields",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.setHoldPulls(true)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    _ = try await harness.session.perform(.submit)
+
+    await harness.jira.setHoldPulls(false)
+    try await waitUntil {
+        try await harness.session.state().catalog.rows.contains {
+            $0.key == TicketKey("FAK-1") && $0.status == "To Do"
+        }
+    }
+    let inserted = try #require(
+        try await harness.session.state().catalog.rows.first { $0.key == TicketKey("FAK-1") }
+    )
+    #expect(inserted.shortLabel == StoryReply.shortLabel)
+    #expect(inserted.ticketType == .story)
+    #expect(inserted.status == "To Do")
+}
+
+@Test func afterSubmitLocalInsertKeepsShortLabelAndTypeWhenAPullOmitsTheNewRow() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date().addingTimeInterval(-3601),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress")
+        ],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: TicketKey("FAK-100"),
+                status: "To Do"
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.jira.seed(
+        epics: [
+            SeededEpic(
+                key: "FAK-100",
+                name: "Warehouse picking",
+                status: "In Progress",
+                description: "Epic Scope"
+            )
+        ],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick — refreshed",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: "FAK-100",
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "FAK-231 body is Scope",
+                comments: []
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.jira.setHoldPulls(true)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.catalog.rows.contains { row in
+        row.key == TicketKey("FAK-1") && row.shortLabel == StoryReply.shortLabel
+            && row.ticketType == .story
+    })
+
+    await harness.jira.setHoldPulls(false)
+    try await waitUntil {
+        try await harness.session.state().catalog.rows.contains {
+            $0.key == TicketKey("FAK-231") && $0.title == "Scan tote before pick — refreshed"
+        }
+    }
+    let catalog = try await harness.session.state().catalog
+    let inserted = try #require(catalog.rows.first { $0.key == TicketKey("FAK-1") })
+    #expect(inserted.shortLabel == StoryReply.shortLabel)
+    #expect(inserted.ticketType == .story)
+    #expect(inserted.title == StoryReply.title)
+    #expect(catalog.rows.contains { $0.key == TicketKey("FAK-231") })
+}
+
+@Test func laterOpenDoesNotRefreshACatalogPulledWithinTheHour() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date().addingTimeInterval(-60),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress")
+        ],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "Scan tote before pick",
+                jiraIssueType: "Story"
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-400",
+                title: "A different recent title",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "must not be pulled yet",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let state = try await harness.session.perform(.generate)
+
+    #expect(state.catalog.rows.first?.title == "Scan tote before pick")
+    #expect(await harness.jira.catalogPulls.isEmpty)
+}
+
+@Test func laterOpenDoesNotBlockGenerateOnAStaleCatalogRefresh() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date().addingTimeInterval(-3601),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress")
+        ],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: TicketKey("FAK-100"),
+                status: "To Do"
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.jira.seed(
+        epics: [
+            SeededEpic(
+                key: "FAK-100",
+                name: "Warehouse picking",
+                status: "In Progress",
+                description: "Epic Scope"
+            )
+        ],
+        issues: [
+            SeededIssue(
+                key: "FAK-400",
+                title: "A different recent title",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: "FAK-100",
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_100),
+                body: "Body of FAK-400 must not reach Generate",
+                comments: []
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.jira.setHoldPulls(true)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+
+    #expect(generated.catalog.rows.first?.title == "Scan tote before pick")
+    #expect(generated.catalog.rows.first?.key == TicketKey("FAK-231"))
+    let sent = try #require(await harness.model.draftRequests.last?.catalog)
+    #expect(sent.rows.first?.title == "Scan tote before pick")
+    try await waitUntil { await harness.jira.catalogPulls.count == 1 }
+
+    await harness.jira.setHoldPulls(false)
+    try await waitUntil {
+        try await harness.session.state().catalog.rows.first?.title == "A different recent title"
+    }
+    let refreshed = try await harness.session.state()
+    #expect(refreshed.catalog.rows.first?.key == TicketKey("FAK-400"))
+    #expect(!catalogText(refreshed.catalog).contains("Body of FAK-400 must not reach Generate"))
+}
+
+@Test func laterOpenServesLastCatalogPullWhenJiraIsUnreachable() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [
+            SeededEpic(
+                key: "FAK-100",
+                name: "Warehouse picking",
+                status: "In Progress",
+                description: "Epic Scope that must stay out of the Catalog"
+            )
+        ],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: "FAK-100",
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "FAK-231 body must not reach Generate",
+                comments: []
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    await harness.jira.setUnreachable(true)
+
+    let restarted = harness.reopen()
+    _ = try await restarted.perform(.typeBrainDump(StoryReply.brainDump))
+    let state = try await restarted.perform(.generate)
+
+    #expect(state.catalog.epics.map(\.name) == ["Warehouse picking"])
+    let row = try #require(state.catalog.rows.first)
+    #expect(row.key == TicketKey("FAK-231"))
+    #expect(row.title == "Scan tote before pick")
+    #expect(state.catalog.componentNames == ["Pick App"])
+
+    let draftRequests = await harness.model.draftRequests
+    let sent = try #require(draftRequests.last?.catalog)
+    #expect(sent.rows.first?.title == "Scan tote before pick")
+    #expect(!catalogText(sent).contains("FAK-231 body must not reach Generate"))
+}
+
+@Test func generateSendsCatalogContextToTheModelAndNotAnotherIssueBody() async throws {
+    let harness = Harness()
+    let otherIssueBody =
+        "Steps to reproduce: open the pick screen. This is FAK-231's body and is Scope."
+    let otherIssueComment = "The cause is a race in BinScanner."
+    let epicDescription = "Epic Scope: rebuild the warehouse pick path."
+    await harness.jira.seed(
+        epics: [
+            SeededEpic(
+                key: "FAK-100",
+                name: "Warehouse picking",
+                status: "In Progress",
+                description: epicDescription
+            )
+        ],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: "FAK-100",
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: otherIssueBody,
+                comments: [otherIssueComment]
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let state = try await harness.session.perform(.generate)
+
+    #expect(state.catalog.epics == [
+        CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress")
+    ])
+    #expect(state.catalog.componentNames == ["Pick App"])
+    let row = try #require(state.catalog.rows.first)
+    #expect(row.key == TicketKey("FAK-231"))
+    #expect(row.title == "Scan tote before pick")
+    #expect(row.jiraIssueType == "Story")
+    #expect(row.labels == ["picking"])
+    #expect(row.parentEpicKey == TicketKey("FAK-100"))
+    #expect(row.status == "To Do")
+
+    let draftRequests = await harness.model.draftRequests
+    #expect(draftRequests.count == 1)
+    let sent = draftRequests[0].catalog
+    let sentRow = try #require(sent.rows.first)
+    #expect(sent.epics == state.catalog.epics)
+    #expect(sentRow.title == "Scan tote before pick")
+    #expect(sentRow.labels == ["picking"])
+    #expect(sentRow.parentEpicKey == TicketKey("FAK-100"))
+    #expect(sent.componentNames == ["Pick App"])
+    #expect(!catalogText(sent).contains(otherIssueBody))
+    #expect(!catalogText(sent).contains(otherIssueComment))
+    #expect(!catalogText(sent).contains(epicDescription))
+}
+
+@Test func unreachableJiraWithNoPriorPullLeavesEmptyCatalogAndGenerateStillRuns() async throws {
+    let harness = Harness()
+    await harness.jira.setUnreachable(true)
+    await harness.jira.seed(
+        epics: [
+            SeededEpic(
+                key: "FAK-100",
+                name: "Warehouse picking",
+                status: "In Progress",
+                description: "must not arrive; the pull never succeeds"
+            )
+        ],
+        issues: [],
+        componentNames: ["Pick App"]
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let state = try await harness.session.perform(.generate)
+
+    let draft = try #require(state.draft)
+    #expect(draft.ticketType == .story)
+    #expect(state.catalog.epics.isEmpty)
+    #expect(state.catalog.rows.isEmpty)
+    #expect(state.catalog.componentNames.isEmpty)
+
+    let draftRequests = await harness.model.draftRequests
+    #expect(draftRequests.count == 1)
+    #expect(draftRequests[0].catalog.rows.isEmpty)
+    #expect(draftRequests[0].catalog.epics.isEmpty)
+}
+
 @Test func generateProducesStoryDraftFromTypedBrainDumpWhenCatalogIsEmpty() async throws {
     let harness = Harness()
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
@@ -233,6 +588,32 @@ import Fakthis
     #expect(retried.catalog.rows[0].ticketType == .story)
 }
 
+private func catalogText(_ catalog: Catalog) -> String {
+    let epics = catalog.epics.map { "\($0.key.value) \($0.name) \($0.status)" }.joined()
+    let rows = catalog.rows.map { row in
+        let parent = row.parentEpicKey?.value ?? ""
+        return "\(row.key.value) \(row.title) \(row.jiraIssueType) \(row.labels.joined()) \(parent) \(row.status)"
+    }.joined()
+    return epics + rows + catalog.componentNames.joined()
+}
+
+private func waitUntil(
+    timeout: Duration = .seconds(1),
+    _ predicate: () async throws -> Bool
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if try await predicate() { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("timed out waiting for Catalog refresh")
+}
+
+private struct DiskCatalog: Codable {
+    var pulledAt: Date?
+    var catalog: Catalog
+}
+
 private struct DiskSidecar: Decodable {
     var ticketType: TicketType
     var title: String
@@ -300,5 +681,25 @@ private struct Harness {
             .appending(component: "FAK")
             .appending(component: "drafts")
             .appending(component: id)
+    }
+
+    func writeCatalog(
+        pulledAt: Date,
+        epics: [CatalogEpic],
+        rows: [CatalogRow],
+        componentNames: [String]
+    ) throws {
+        let folder = root
+            .appending(component: "projects")
+            .appending(component: "FAK")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let file = DiskCatalog(
+            pulledAt: pulledAt,
+            catalog: Catalog(epics: epics, rows: rows, componentNames: componentNames)
+        )
+        try encoder.encode(file).write(to: folder.appending(component: "catalog.json"))
     }
 }

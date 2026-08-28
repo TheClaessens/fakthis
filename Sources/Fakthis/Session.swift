@@ -1,5 +1,7 @@
 import Foundation
 
+private let catalogStaleAfter: TimeInterval = 60 * 60
+
 public actor Session {
     public enum Intent: Sendable {
         case typeBrainDump(String)
@@ -36,17 +38,24 @@ public actor Session {
 
     public func state() throws -> State {
         try loadDraftIfMissing()
+        try loadCatalogFromDiskIfNeeded()
+        startBackgroundRefreshIfStale()
         return snapshot()
     }
 
     public func perform(_ intent: Intent) async throws -> State {
         try loadDraftIfMissing()
+        try loadCatalogFromDiskIfNeeded()
         switch intent {
         case .typeBrainDump(let text):
+            startBackgroundRefreshIfStale()
             field = text
         case .generate:
+            try await pullCatalogIfNeverPulled()
+            startBackgroundRefreshIfStale()
             try await generate()
         case .submit:
+            startBackgroundRefreshIfStale()
             try await submit()
         }
         return snapshot()
@@ -80,6 +89,72 @@ public actor Session {
             )
         )
         try persistDraft()
+        try persistCatalog()
+    }
+
+    private var catalogLoaded = false
+    private var catalogPulledAt: Date?
+    private var firstPullFailed = false
+    private var refreshTask: Task<Void, Never>?
+
+    private func pullCatalogIfNeverPulled() async throws {
+        guard catalogPulledAt == nil, !firstPullFailed else { return }
+        do {
+            try applySuccessfulPull(try await jira.pullCatalog(projectKey: project.key))
+        } catch is JiraUnreachable {
+            firstPullFailed = true
+        } catch {
+            throw error
+        }
+    }
+
+    private func startBackgroundRefreshIfStale() {
+        guard let catalogPulledAt else { return }
+        guard Date().timeIntervalSince(catalogPulledAt) > catalogStaleAfter else { return }
+        guard refreshTask == nil else { return }
+        refreshTask = Task { await self.refreshCatalog() }
+    }
+
+    private func refreshCatalog() async {
+        defer { refreshTask = nil }
+        do {
+            try applySuccessfulPull(try await jira.pullCatalog(projectKey: project.key))
+        } catch {
+            return
+        }
+    }
+
+    private func applySuccessfulPull(_ pulled: Catalog) throws {
+        catalog = catalog.mergingPull(pulled)
+        catalogPulledAt = Date()
+        try persistCatalog()
+    }
+
+    private func loadCatalogFromDiskIfNeeded() throws {
+        if catalogLoaded { return }
+        catalogLoaded = true
+        let url = projectRoot().appending(component: "catalog.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let file = try decoder.decode(CatalogFile.self, from: Data(contentsOf: url))
+        catalog = file.catalog
+        catalogPulledAt = file.pulledAt
+    }
+
+    private func persistCatalog() throws {
+        let folder = projectRoot()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let file = CatalogFile(pulledAt: catalogPulledAt, catalog: catalog)
+        try encoder.encode(file).write(to: folder.appending(component: "catalog.json"))
+    }
+
+    private struct CatalogFile: Codable {
+        var pulledAt: Date?
+        var catalog: Catalog
     }
 
     private func generate() async throws {
@@ -189,10 +264,13 @@ public actor Session {
     }
 
     private func draftsRoot() -> URL {
+        projectRoot().appending(component: "drafts")
+    }
+
+    private func projectRoot() -> URL {
         applicationSupport
             .appending(component: "projects")
             .appending(component: project.key)
-            .appending(component: "drafts")
     }
 
     private struct Sidecar: Codable {

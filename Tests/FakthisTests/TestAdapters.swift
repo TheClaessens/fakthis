@@ -1,3 +1,4 @@
+import Foundation
 import Fakthis
 
 struct ModelDraftRequest: Equatable, Sendable {
@@ -42,10 +43,36 @@ struct CreatedTicket: Equatable, Sendable {
     var issueType: String
 }
 
+struct SeededEpic: Sendable {
+    var key: String
+    var name: String
+    var status: String
+    var description: String
+}
+
+struct SeededIssue: Sendable {
+    var key: String
+    var title: String
+    var jiraIssueType: String
+    var labels: [String]
+    var parentEpicKey: String?
+    var status: String
+    var created: Date
+    var body: String
+    var comments: [String]
+}
+
 actor FakeJira: Jira {
     var unreachable = false
     var nextKey = TicketKey("FAK-1")
     private(set) var created: [CreatedTicket] = []
+    private(set) var catalogPulls: [String] = []
+    private var seededEpics: [SeededEpic] = []
+    private var seededIssues: [SeededIssue] = []
+    private var seededComponentNames: [String] = []
+
+    private var holdPulls = false
+    private var pullWaiters: [CheckedContinuation<Void, Never>] = []
 
     func createTicket(title: String, descriptionWiki: String, issueType: String) async throws
         -> TicketKey
@@ -55,6 +82,48 @@ actor FakeJira: Jira {
             CreatedTicket(title: title, descriptionWiki: descriptionWiki, issueType: issueType)
         )
         return nextKey
+    }
+
+    func pullCatalog(projectKey: String) async throws -> Catalog {
+        catalogPulls.append(projectKey)
+        if holdPulls {
+            await withCheckedContinuation { pullWaiters.append($0) }
+        }
+        if unreachable { throw JiraUnreachable() }
+        return Catalog(
+            epics: seededEpics.map {
+                CatalogEpic(key: TicketKey($0.key), name: $0.name, status: $0.status)
+            },
+            rows: seededIssues
+                .sorted { $0.created > $1.created }
+                .prefix(300)
+                .map { issue in
+                    CatalogRow(
+                        key: TicketKey(issue.key),
+                        title: issue.title,
+                        jiraIssueType: issue.jiraIssueType,
+                        labels: issue.labels,
+                        parentEpicKey: issue.parentEpicKey.map(TicketKey.init),
+                        status: issue.status,
+                        created: issue.created
+                    )
+                },
+            componentNames: seededComponentNames
+        )
+    }
+
+    func seed(epics: [SeededEpic], issues: [SeededIssue], componentNames: [String]) {
+        seededEpics = epics
+        seededIssues = issues
+        seededComponentNames = componentNames
+    }
+
+    func setHoldPulls(_ value: Bool) {
+        holdPulls = value
+        guard !value else { return }
+        let waiters = pullWaiters
+        pullWaiters = []
+        waiters.forEach { $0.resume() }
     }
 
     func setUnreachable(_ value: Bool) {
