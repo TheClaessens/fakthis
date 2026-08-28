@@ -17,3 +17,7 @@ The five canonical triage roles, label strings equal to their names. See `docs/a
 ### Domain docs
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Functional spec
+
+v1 behaviour: [`docs/fakthis-v1.md`](docs/fakthis-v1.md). Terms in `CONTEXT.md`. Decisions in `docs/adr/`.
