@@ -28,6 +28,89 @@ import Fakthis
     #expect(doneRequests == [StoryReply.firstPassDescription])
 }
 
+@Test func restartingSessionShowsTheInProgressDraftFromDisk() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let original = try #require(generated.draft)
+
+    let restarted = harness.reopen()
+    let state = try await restarted.state()
+    let draft = try #require(state.draft)
+
+    #expect(draft.id == original.id)
+    #expect(draft.ticketType == .story)
+    #expect(draft.title == StoryReply.title)
+    #expect(draft.shortLabel == StoryReply.shortLabel)
+    #expect(draft.description == original.description)
+    #expect(draft.key == nil)
+}
+
+@Test func restartingSessionShowsTheCurrentDraftNotAnOrphanFromAnEarlierGenerate() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let first = try await harness.session.perform(.generate)
+    let firstId = try #require(first.draft).id
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: "As a picker I want a second Generate so that the Draft is revised",
+            shortLabel: "second generate",
+            description: "Revised description.",
+            openQuestions: []
+        )
+    )
+    let second = try await harness.session.perform(.generate)
+    let current = try #require(second.draft)
+    #expect(current.id == firstId)
+    #expect(current.title == "As a picker I want a second Generate so that the Draft is revised")
+
+    let restarted = harness.reopen()
+    let state = try await restarted.state()
+    let draft = try #require(state.draft)
+    #expect(draft.id == current.id)
+    #expect(draft.title == current.title)
+}
+
+@Test func submitAfterRestartCreatesTheTicketOnTheSameDraft() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let original = try #require(generated.draft)
+
+    let restarted = harness.reopen()
+    let state = try await restarted.perform(.submit)
+    let draft = try #require(state.draft)
+
+    #expect(draft.id == original.id)
+    #expect(draft.key == TicketKey("FAK-1"))
+    #expect(draft.title == StoryReply.title)
+    #expect(state.catalog.rows[0].shortLabel == StoryReply.shortLabel)
+    #expect(state.catalog.rows[0].ticketType == .story)
+
+    let created = await harness.jira.created
+    #expect(created.count == 1)
+    #expect(created[0].title == StoryReply.title)
+
+    let sidecar = try JSONDecoder().decode(
+        DiskSidecar.self,
+        from: Data(contentsOf: harness.draftFolder(id: original.id).appending(component: "draft.json"))
+    )
+    #expect(sidecar.key == "FAK-1")
+}
+
+@Test func restartAfterSubmitDoesNotRestoreTheUploadQueueAsAnEditor() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    _ = try await harness.session.perform(.submit)
+
+    let restarted = harness.reopen()
+    let state = try await restarted.state()
+    #expect(state.draft == nil)
+}
+
 @Test func generatedDraftLivesOnDiskAsSidecarMarkdownAndTranscript() async throws {
     let harness = Harness()
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
@@ -173,6 +256,7 @@ private struct Harness {
     let model: ScriptedModel
     let jira: FakeJira
     let root: URL
+    let project: Project
     let session: Session
 
     init(ticketTypeMapping: [TicketType: String] = [.story: "Story"]) {
@@ -188,11 +272,22 @@ private struct Harness {
         )
         let jira = FakeJira()
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        let project = Project(key: "FAK", ticketTypeMapping: ticketTypeMapping, terms: [])
         self.model = model
         self.jira = jira
         self.root = root
+        self.project = project
         self.session = Session(
-            project: Project(key: "FAK", ticketTypeMapping: ticketTypeMapping, terms: []),
+            project: project,
+            applicationSupport: root,
+            model: model,
+            jira: jira
+        )
+    }
+
+    func reopen() -> Session {
+        Session(
+            project: project,
             applicationSupport: root,
             model: model,
             jira: jira

@@ -34,7 +34,13 @@ public actor Session {
         self.jira = jira
     }
 
+    public func state() throws -> State {
+        try loadDraftIfMissing()
+        return snapshot()
+    }
+
     public func perform(_ intent: Intent) async throws -> State {
+        try loadDraftIfMissing()
         switch intent {
         case .typeBrainDump(let text):
             field = text
@@ -95,7 +101,7 @@ public actor Session {
             \(bullets)
             """
         draft = Draft(
-            id: UUID().uuidString,
+            id: draft?.id ?? UUID().uuidString,
             ticketType: generated.ticketType,
             title: generated.title,
             shortLabel: generated.shortLabel,
@@ -104,6 +110,43 @@ public actor Session {
         )
         try persistDraft()
         try persistTranscript()
+    }
+
+    private func loadDraftIfMissing() throws {
+        if draft != nil { return }
+        draft = try loadInProgressDraft()
+    }
+
+    private func loadInProgressDraft() throws -> Draft? {
+        let root = draftsRoot()
+        guard FileManager.default.fileExists(atPath: root.path) else { return nil }
+        let folders = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        for folder in folders {
+            guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            else { continue }
+            let sidecarURL = folder.appending(component: "draft.json")
+            guard FileManager.default.fileExists(atPath: sidecarURL.path) else { continue }
+            let sidecar = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarURL))
+            if sidecar.key != nil { continue }
+            let description = try String(
+                contentsOf: folder.appending(component: "description.md"),
+                encoding: .utf8
+            )
+            return Draft(
+                id: folder.lastPathComponent,
+                ticketType: sidecar.ticketType,
+                title: sidecar.title,
+                shortLabel: sidecar.shortLabel,
+                description: description,
+                openQuestions: sidecar.openQuestions
+            )
+        }
+        return nil
     }
 
     private func persistDraft() throws {
@@ -142,11 +185,14 @@ public actor Session {
     }
 
     private func draftFolder(id: String) -> URL {
+        draftsRoot().appending(component: id)
+    }
+
+    private func draftsRoot() -> URL {
         applicationSupport
             .appending(component: "projects")
             .appending(component: project.key)
             .appending(component: "drafts")
-            .appending(component: id)
     }
 
     private struct Sidecar: Codable {
