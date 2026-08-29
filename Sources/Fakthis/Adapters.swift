@@ -6,7 +6,18 @@ public protocol Model: Sendable {
 
 public protocol Transcriber: Sendable {
     func compileStatus() async -> CompileStatus
-    func transcribe(terms: [String]) async throws -> String
+    func beginTake() async
+    func transcribe(boostList: [String]) async throws -> String
+}
+
+extension Transcriber {
+    public func beginTake() async {}
+}
+
+public enum TranscriberBoost {
+    public static let cap = 100
+    public static let hardStop = 230
+    public static let whisperTokens = 223
 }
 
 public enum CompileStatus: Sendable {

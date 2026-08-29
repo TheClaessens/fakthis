@@ -10,7 +10,7 @@ struct ModelCompleteRequest: Equatable, Sendable {
 actor FakeTranscriber: Transcriber {
     private var compileFinished: Bool
     private var takes: [String] = []
-    private(set) var transcribeTerms: [[String]] = []
+    private(set) var boostLists: [[String]] = []
     private var holdTranscribe = false
     private var transcribeWaiters: [CheckedContinuation<Void, Never>] = []
     private var failTranscribe = false
@@ -43,8 +43,8 @@ actor FakeTranscriber: Transcriber {
         compileFinished ? .done : .inProgress
     }
 
-    func transcribe(terms: [String]) async throws -> String {
-        transcribeTerms.append(terms)
+    func transcribe(boostList: [String]) async throws -> String {
+        boostLists.append(boostList)
         if failTranscribe { throw TranscribeFailed() }
         if holdTranscribe {
             await withCheckedContinuation { transcribeWaiters.append($0) }

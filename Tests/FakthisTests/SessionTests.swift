@@ -1582,7 +1582,7 @@ import Fakthis
     await harness.transcriber.enqueueTake("scan the bin")
     _ = try await harness.session.perform(.startListening)
     _ = try await harness.session.perform(.stopListening)
-    #expect(await harness.transcriber.transcribeTerms == [[]])
+    #expect(await harness.transcriber.boostLists == [[]])
 }
 
 @Test func bothVoiceTiersPassProjectTermsOnTheBatchPass() async throws {
@@ -1590,16 +1590,66 @@ import Fakthis
     await harness.transcriber.enqueueTake("scan the bin")
     _ = try await harness.session.perform(.startListening)
     _ = try await harness.session.perform(.stopListening)
-    #expect(await harness.transcriber.transcribeTerms == [["bin", "pick screen"]])
+    #expect(await harness.transcriber.boostLists == [["bin", "pick screen"]])
 
     _ = try await harness.session.perform(.generate)
     await harness.transcriber.enqueueTake("show a blocking error")
     _ = try await harness.session.perform(.startListening)
     _ = try await harness.session.perform(.stopListening)
-    #expect(await harness.transcriber.transcribeTerms == [
+    #expect(await harness.transcriber.boostLists == [
         ["bin", "pick screen"],
         ["bin", "pick screen"],
     ])
+}
+
+@Test func stopListeningProjectsProjectTermsThenEpicNamesThenComponentsAndNeverTitles() async throws {
+    let harness = Harness(terms: ["bin", "SM-A-rt"])
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress"),
+            CatalogEpic(key: TicketKey("FAK-200"), name: "Exports", status: "To Do"),
+        ],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "This title must not be boosted",
+                jiraIssueType: "Story"
+            ),
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    #expect(await harness.transcriber.boostLists == [[
+        "bin",
+        "SM-A-rt",
+        "Warehouse picking",
+        "Exports",
+        "Pick App",
+    ]])
+}
+
+@Test func transcriberBoostListCapsAtOneHundredKeepingTermsThenEpics() async throws {
+    let terms = (1...80).map { "term-\($0)" }
+    let harness = Harness(terms: terms)
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: (1...30).map {
+            CatalogEpic(key: TicketKey("FAK-\($0)"), name: "epic-\($0)", status: "To Do")
+        },
+        rows: [],
+        componentNames: (1...10).map { "component-\($0)" }
+    )
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    let passed = try #require(await harness.transcriber.boostLists.first)
+    #expect(passed.count == TranscriberBoost.cap)
+    #expect(passed.prefix(80) == ArraySlice(terms))
+    #expect(Array(passed.dropFirst(80)) == (1...20).map { "epic-\($0)" })
+    #expect(!passed.contains("component-1"))
 }
 
 @Test func typeOverAfterATakeIsWhatGenerateSends() async throws {
@@ -1627,7 +1677,7 @@ import Fakthis
     let generated = try await harness.session.perform(.generate)
     #expect(generated.field == StoryReply.brainDump)
     #expect(await harness.model.completeRequests.first?.user == StoryReply.brainDump)
-    #expect(await harness.transcriber.transcribeTerms.isEmpty)
+    #expect(await harness.transcriber.boostLists.isEmpty)
 }
 
 @Test func stopListeningShowsTranscribingThenYourTurn() async throws {

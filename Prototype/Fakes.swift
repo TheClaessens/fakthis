@@ -9,7 +9,7 @@ actor FakeTranscriber: Transcriber {
     private var compileFinished: Bool
     init(compileFinished: Bool) { self.compileFinished = compileFinished }
     func compileStatus() async -> CompileStatus { compileFinished ? .done : .inProgress }
-    func transcribe(terms: [String]) async throws -> String { "" }
+    func transcribe(boostList: [String]) async throws -> String { "" }
 }
 
 actor FakeSecrets: Secrets {

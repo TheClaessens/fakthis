@@ -163,7 +163,7 @@ public actor Session {
             tickRelated(key)
         case .startListening:
             startBackgroundRefreshIfStale()
-            startListening()
+            await startListening()
         case .stopListening:
             startBackgroundRefreshIfStale()
             try await stopListening()
@@ -589,9 +589,17 @@ public actor Session {
         try persistMaterial()
     }
 
-    private func startListening() {
+    private func startListening() async {
         guard project != nil, !aneCompileInProgress, status != .listening else { return }
         status = .listening
+        await transcriber.beginTake()
+    }
+
+    private func transcriberBoostList() -> [String] {
+        Array(
+            ((project?.terms ?? []) + catalog.epics.map(\.name) + catalog.componentNames)
+                .prefix(TranscriberBoost.cap)
+        )
     }
 
     private func stopListening() async throws {
@@ -599,7 +607,7 @@ public actor Session {
         status = .transcribing
         defer { status = .yourTurn }
         do {
-            commitTake(try await transcriber.transcribe(terms: project?.terms ?? []))
+            commitTake(try await transcriber.transcribe(boostList: transcriberBoostList()))
         } catch is TranscribeFailed {
             return
         }
