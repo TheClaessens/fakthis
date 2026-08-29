@@ -186,37 +186,39 @@ Open question the front door does not answer: with no rail before Generate, Batc
 become toolbar links. That is probably right — you choose the surface before you have anything
 — but it is a decision, not a detail.
 
-**8. Removing Submit is the fix, not disabling it.** All three styles simply have no Submit
+**13. Removing Submit is the fix, not disabling it.** All three styles simply have no Submit
 pre-Generate, and first-pass finding 1 evaporates. A disabled Submit would still be answering
 "can I submit yet?"; absence does not raise the question.
 
-**9. The collapsed conversation spine is dead furniture before a Draft exists.**
+**14. The collapsed conversation spine is dead furniture before a Draft exists.**
 `c2-1-braindump-fieldCentre.png` runs "Nothing said yet" down a 46pt strip that cannot be used
 yet. Before Generate the conversation column should not exist — which is exactly the two-column
 style's argument, and the front door's by construction.
 
-**10. Ticket type must not be offered before Generate.** All three styles render the control,
+**15. Ticket type must not be offered before Generate.** All three styles render the control,
 and all three are wrong. §7.2 has the agent *infer* type at Generate; a Story/Bug/Chore control
 sitting over an empty field invites the PM to pre-set it, which turns the inference into a
-correction instead of a proposal. It belongs on the Draft, never on the brain-dump.
+correction instead of a proposal. It belongs on the Draft, never on the brain-dump — which is
+compatible with finding 10: 10 says where the control goes once a Draft exists, 15 says it does
+not exist before that.
 
 ## The two fixes
 
-**11. Displacing beats overlaying — and costs a column.** `c2-3-signals.png` shows all eight
+**16. Displacing beats overlaying — and costs a column.** `c2-3-signals.png` shows all eight
 signals with nothing covered and Submit still reachable, which the first pass could not do. But
 the window is now five columns and the Draft is down to ~590pt, wrapping the description to a
 narrow measure. So the panel is a *temporary* state; the gutter is the resting state and should
 be what opens by default.
 
-**12. The panel does not size to its content.** `c2-5-rewrite.png`: one signal, 288pt wide,
+**17. The panel does not size to its content.** `c2-5-rewrite.png`: one signal, 288pt wide,
 ~1000pt of white space under it. Height should follow the signals, and one signal probably
 belongs in the gutter's tooltip rather than a column.
 
-**13. Collapsing the conversation is right, and Rewrite proves it.** `c2-5-rewrite.png` puts the
+**18. Collapsing the conversation is right, and Rewrite proves it.** `c2-5-rewrite.png` puts the
 live body, the comments, the Draft, the diff and `Update FAK-231` on one screen with room to
 spare. This is the strongest single screenshot in either pass.
 
-**14. The duplicate still renders twice** — once in the conversation, once in the panel
+**19. The duplicate still renders twice** — once in the conversation, once in the panel
 (`c2-3-signals.png`). Confirms first-pass finding 4: this is not a layout problem, and no
 placement fixes it. It needs the decision that a duplicate is a conversation event which leaves
 a gutter mark, and never a signal row.
