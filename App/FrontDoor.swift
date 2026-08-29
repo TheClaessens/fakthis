@@ -16,7 +16,6 @@ struct FrontDoor: View {
     /// back, so the PM reads the words before Generate ever sees them.
     @State private var brainDump = ""
     @State private var pushesInFlight = 0
-    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,10 +35,7 @@ struct FrontDoor: View {
                     .materialIntake(attach: attach)
             }
         }
-        .onAppear {
-            brainDump = model.field
-            fieldFocused = true
-        }
+        .onAppear { brainDump = model.field }
         .onChange(of: brainDump) { _, typed in
             pushesInFlight += 1
             Task {
@@ -84,10 +80,7 @@ struct FrontDoor: View {
 
             /// Sixty spoken words, not a column-height box. A field the height of the window
             /// makes it look like Fakthis is waiting for an essay.
-            TextEditor(text: $brainDump)
-                .font(.system(size: 13.5))
-                .scrollContentBackground(.hidden)
-                .padding(6)
+            BrainDumpField(text: $brainDump, attach: attach)
                 .frame(height: 150)
                 .background(Color(nsColor: .textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -105,7 +98,6 @@ struct FrontDoor: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .focused($fieldFocused)
 
             chips
 

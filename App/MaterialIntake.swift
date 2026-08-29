@@ -28,9 +28,11 @@ enum MaterialIntake {
         )
     }
 
-    /// A pasted screenshot has pixels and no name, so it is given one. `Session` reads the kind
-    /// off the mime type, so that has to be right even when the name is invented.
-    @MainActor static func pastedMaterial(from pasteboard: NSPasteboard) -> [Fakthis.Material] {
+    /// What a pasteboard is carrying, whether it arrived by a paste or a drag. A screenshot has
+    /// pixels and no name, so it is given one; `Session` reads the kind off the mime type, so
+    /// that has to be right even when the name is invented. Words return nothing, and the caller
+    /// lets them be typing.
+    @MainActor static func material(from pasteboard: NSPasteboard) -> [Fakthis.Material] {
         // File URLs only. Without the restriction a copied link reads back as an `NSURL` and a
         // plain paste of a web address would be swallowed as Material.
         let files = pasteboard.readObjects(
@@ -74,39 +76,11 @@ extension AttachedMaterial {
     }
 }
 
-/// Command-V while the composer is on screen. The field is a text view, and a text view eats
-/// the paste without acting on it when the pasteboard holds a screenshot or a file — so the
-/// window watches for the key itself and only intervenes when there is Material to take. Words
-/// on the pasteboard fall through to the field, because pasting words into a brain-dump is
-/// typing, not attaching.
-@MainActor
-final class MaterialPasteMonitor {
-    private var monitor: Any?
-
-    func start(attach: @escaping ([Fakthis.Material]) -> Void) {
-        guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                event.charactersIgnoringModifiers == "v"
-            else { return event }
-            let pasted = MaterialIntake.pastedMaterial(from: .general)
-            guard !pasted.isEmpty else { return event }
-            attach(pasted)
-            return nil
-        }
-    }
-
-    func stop() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
-    }
-}
-
-/// Drop and paste, on whatever the composer is. Both hand `Session` the same intent.
+/// A drop anywhere else on the composer — beside the field, on the chips. The field answers for
+/// itself; this catches the rest of the card so the whole thing is one target.
 struct MaterialIntakeModifier: ViewModifier {
     var attach: ([Fakthis.Material]) -> Void
     @State private var targeted = false
-    @State private var paste = MaterialPasteMonitor()
 
     func body(content: Content) -> some View {
         content
@@ -116,8 +90,6 @@ struct MaterialIntakeModifier: ViewModifier {
                 attach(attached)
                 return true
             } isTargeted: { targeted = $0 }
-            .onAppear { paste.start(attach: attach) }
-            .onDisappear { paste.stop() }
             .overlay {
                 if targeted {
                     RoundedRectangle(cornerRadius: 10)
