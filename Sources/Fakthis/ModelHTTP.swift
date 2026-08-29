@@ -3,13 +3,13 @@ import Foundation
 public actor ModelHTTP: Model {
     private let endpoint: URL
     private let modelId: String
-    private let apiKey: @Sendable () throws -> String
+    private let apiKey: @Sendable () async throws -> String
     private let send: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     public init(
         endpoint: URL = URL(string: "https://api.openai.com/v1/chat/completions")!,
         modelId: String = "gpt-5.6-luna",
-        apiKey: @escaping @Sendable () throws -> String,
+        apiKey: @escaping @Sendable () async throws -> String,
         send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)
     ) {
         self.endpoint = endpoint
@@ -21,7 +21,7 @@ public actor ModelHTTP: Model {
     public func complete(system: String, user: String) async throws -> String {
         let key: String
         do {
-            key = try apiKey()
+            key = try await apiKey()
         } catch {
             throw ModelFailed()
         }

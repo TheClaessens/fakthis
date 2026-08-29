@@ -2,6 +2,141 @@ import Foundation
 import Testing
 import Fakthis
 
+@Test func firstLaunchShowsANECompileInProgressUntilItIsDone() async throws {
+    let harness = Harness(seedProject: false, compileFinished: false)
+    let compiling = try await harness.session.state()
+    #expect(compiling.aneCompileInProgress)
+
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    #expect(!FileManager.default.fileExists(atPath: harness.settingsURL.path))
+    #expect(try await harness.session.state().settings == nil)
+
+    await harness.transcriber.finishCompile()
+    let ready = try await harness.session.state()
+    #expect(!ready.aneCompileInProgress)
+}
+
+@Test func firstLaunchStoresSecretsOffDiskAndSettingsWithoutSecrets() async throws {
+    let harness = Harness(seedProject: false)
+    _ = try await harness.session.perform(firstLaunchCredentials)
+
+    let state = try await harness.session.state()
+    #expect(!state.aneCompileInProgress)
+    let settings = try #require(state.settings)
+    #expect(settings.site == "faktion.atlassian.net")
+    #expect(settings.email == "pm@faktion.com")
+    #expect(settings.provider == "openai")
+    #expect(settings.modelId == "gpt-5.6-luna")
+
+    #expect(try await harness.secrets.jiraToken() == "jira-secret")
+    #expect(try await harness.secrets.modelKey() == "model-secret")
+
+    let settingsJSON = try String(contentsOf: harness.settingsURL, encoding: .utf8)
+    #expect(settingsJSON.contains("faktion.atlassian.net"))
+    #expect(settingsJSON.contains("pm@faktion.com"))
+    #expect(settingsJSON.contains("openai"))
+    #expect(settingsJSON.contains("gpt-5.6-luna"))
+    #expect(!settingsJSON.contains("jira-secret"))
+    #expect(!settingsJSON.contains("model-secret"))
+
+    let restarted = harness.reopen()
+    let restored = try #require(try await restarted.state().settings)
+    #expect(restored.site == "faktion.atlassian.net")
+    #expect(restored.email == "pm@faktion.com")
+    #expect(restored.provider == "openai")
+    #expect(restored.modelId == "gpt-5.6-luna")
+}
+
+@Test func addingAProjectDiscoversIssueTypesAndShowsMappingForOverride() async throws {
+    let harness = Harness(seedProject: false)
+    await harness.jira.seedIssueTypes([
+        JiraIssueType(name: "Epic", hierarchyLevel: 1, subtask: false),
+        JiraIssueType(name: "Work", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Story", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Bug", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Sub-task", hierarchyLevel: -1, subtask: true),
+    ])
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    let state = try await harness.session.perform(.enterProjectKey("FAK"))
+
+    let proposed = try #require(state.proposedProject)
+    #expect(proposed.key == "FAK")
+    #expect(proposed.mapping[TicketType.story] == "Story")
+    #expect(proposed.mapping[TicketType.bug] == "Bug")
+    #expect(proposed.mapping[TicketType.chore] == "Work")
+    #expect(proposed.standardJiraIssueTypes == ["Work", "Story", "Bug"])
+    #expect(state.project == nil)
+}
+
+@Test func confirmingAProjectStoresMappingEmptyTermsPullsCatalogAndWarnsAboutTextMaterial()
+    async throws
+{
+    let harness = Harness(seedProject: false)
+    await harness.jira.seedIssueTypes([
+        JiraIssueType(name: "Epic", hierarchyLevel: 1, subtask: false),
+        JiraIssueType(name: "Work", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Story", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Bug", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Sub-task", hierarchyLevel: -1, subtask: true),
+    ])
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    _ = try await harness.session.perform(.enterProjectKey("FAK"))
+    let overridden: [TicketType: String] = [
+        .story: "Story",
+        .bug: "Bug",
+        .chore: "Story",
+    ]
+    let state = try await harness.session.perform(.confirmProject(mapping: overridden))
+
+    let project = try #require(state.project)
+    #expect(project.key == "FAK")
+    #expect(project.ticketTypeMapping == overridden)
+    #expect(project.terms == [])
+    #expect(state.proposedProject == nil)
+    #expect(state.catalog.rows.isEmpty)
+    #expect(state.catalog.epics.isEmpty)
+    #expect(state.textMaterialWarning == "Text Material is sent to the model provider.")
+
+    let onDisk = try JSONDecoder().decode(
+        DiskProject.self,
+        from: Data(contentsOf: harness.projectJSONURL)
+    )
+    #expect(onDisk.ticketTypeMapping == overridden)
+    #expect(onDisk.terms == [])
+    let projectJSON = try String(contentsOf: harness.projectJSONURL, encoding: .utf8)
+    #expect(!projectJSON.contains("jira-secret"))
+    #expect(!projectJSON.contains("model-secret"))
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.draft?.ticketType == .story)
+    #expect(generated.catalog.rows.isEmpty)
+
+    let restarted = harness.reopen()
+    let restored = try #require(try await restarted.state().project)
+    #expect(restored.key == "FAK")
+    #expect(restored.ticketTypeMapping == overridden)
+    #expect(restored.terms == [])
+}
+
+@Test func addingAProjectMapsAllTicketTypesOntoOneJiraIssueType() async throws {
+    let harness = Harness(seedProject: false)
+    await harness.jira.seedIssueTypes([
+        JiraIssueType(name: "Epic", hierarchyLevel: 1, subtask: false),
+        JiraIssueType(name: "Task", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Sub-task", hierarchyLevel: -1, subtask: true),
+    ])
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    let proposed = try await harness.session.perform(.enterProjectKey("FAK"))
+    let mapping = try #require(proposed.proposedProject?.mapping)
+    #expect(mapping[TicketType.story] == "Task")
+    #expect(mapping[TicketType.bug] == "Task")
+    #expect(mapping[TicketType.chore] == "Task")
+
+    let confirmed = try await harness.session.perform(.confirmProject(mapping: mapping))
+    #expect(confirmed.project?.ticketTypeMapping == mapping)
+}
+
 @Test func submitDoesNotQueryAttachmentPolicyWhenTheDraftHasNoMedia() async throws {
     let harness = Harness()
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
@@ -658,6 +793,19 @@ import Fakthis
     #expect(retried.catalog.rows[0].ticketType == .story)
 }
 
+private let firstLaunchSettings = Settings(
+    site: "faktion.atlassian.net",
+    email: "pm@faktion.com",
+    provider: "openai",
+    modelId: "gpt-5.6-luna"
+)
+
+private let firstLaunchCredentials = Session.Intent.saveCredentials(
+    firstLaunchSettings,
+    jiraToken: "jira-secret",
+    modelKey: "model-secret"
+)
+
 private func catalogText(_ catalog: Catalog) -> String {
     let epics = catalog.epics.map { "\($0.key.value) \($0.name) \($0.status)" }.joined()
     let rows = catalog.rows.map { row in
@@ -706,13 +854,28 @@ private enum StoryReply {
 private struct Harness {
     let model: ScriptedModel
     let jira: FakeJira
+    let transcriber: FakeTranscriber
+    let secrets: FakeSecrets
     let root: URL
     let project: Project
     let session: Session
 
+    var settingsURL: URL {
+        root.appending(component: "settings.json")
+    }
+
+    var projectJSONURL: URL {
+        root
+            .appending(component: "projects")
+            .appending(component: "FAK")
+            .appending(component: "project.json")
+    }
+
     init(
         ticketTypeMapping: [TicketType: String] = [.story: "Story"],
-        terms: [String] = []
+        terms: [String] = [],
+        seedProject: Bool = true,
+        compileFinished: Bool = true
     ) {
         let model = ScriptedModel(
             reply: GenerateReply(
@@ -725,26 +888,35 @@ private struct Harness {
             definitionOfDone: [StoryReply.definitionOfDone]
         )
         let jira = FakeJira()
+        let transcriber = FakeTranscriber(compileFinished: compileFinished)
+        let secrets = FakeSecrets()
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         let project = Project(key: "FAK", ticketTypeMapping: ticketTypeMapping, terms: terms)
         self.model = model
         self.jira = jira
+        self.transcriber = transcriber
+        self.secrets = secrets
         self.root = root
         self.project = project
         self.session = Session(
-            project: project,
             applicationSupport: root,
             model: model,
-            jira: jira
+            jira: jira,
+            transcriber: transcriber,
+            secrets: secrets
         )
+        if seedProject {
+            try! writeProject(project)
+        }
     }
 
     func reopen() -> Session {
         Session(
-            project: project,
             applicationSupport: root,
             model: model,
-            jira: jira
+            jira: jira,
+            transcriber: transcriber,
+            secrets: secrets
         )
     }
 
@@ -754,6 +926,20 @@ private struct Harness {
             .appending(component: "FAK")
             .appending(component: "drafts")
             .appending(component: id)
+    }
+
+    func writeProject(_ project: Project) throws {
+        let folder = root
+            .appending(component: "projects")
+            .appending(component: project.key)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let file = DiskProject(
+            ticketTypeMapping: project.ticketTypeMapping,
+            terms: project.terms
+        )
+        try encoder.encode(file).write(to: folder.appending(component: "project.json"))
     }
 
     func writeCatalog(
@@ -775,4 +961,9 @@ private struct Harness {
         )
         try encoder.encode(file).write(to: folder.appending(component: "catalog.json"))
     }
+}
+
+private struct DiskProject: Codable {
+    var ticketTypeMapping: [TicketType: String]
+    var terms: [String]
 }

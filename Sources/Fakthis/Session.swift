@@ -7,45 +7,59 @@ public actor Session {
         case typeBrainDump(String)
         case generate
         case submit
+        case saveCredentials(Settings, jiraToken: String, modelKey: String)
+        case enterProjectKey(String)
+        case confirmProject(mapping: [TicketType: String])
     }
 
     public struct State: Equatable, Sendable {
         public var field: String
         public var draft: Draft?
         public var catalog: Catalog
+        public var aneCompileInProgress: Bool
+        public var settings: Settings?
+        public var project: Project?
+        public var proposedProject: ProposedProject?
+        public var textMaterialWarning: String?
     }
 
-    private let project: Project
+    private var project: Project?
     private let applicationSupport: URL
     private let model: any Model
     private let jira: any Jira
+    private let transcriber: any Transcriber
+    private let secrets: any Secrets
 
     private var field = ""
     private var draft: Draft?
     private var catalog = Catalog()
+    private var aneCompileInProgress = true
+    private var settings: Settings?
+    private var proposedProject: ProposedProject?
+    private var textMaterialWarning: String?
 
     public init(
-        project: Project,
         applicationSupport: URL,
         model: any Model,
-        jira: any Jira
+        jira: any Jira,
+        transcriber: any Transcriber,
+        secrets: any Secrets
     ) {
-        self.project = project
         self.applicationSupport = applicationSupport
         self.model = model
         self.jira = jira
+        self.transcriber = transcriber
+        self.secrets = secrets
     }
 
-    public func state() throws -> State {
-        try loadDraftIfMissing()
-        try loadCatalogFromDiskIfNeeded()
+    public func state() async throws -> State {
+        try await load()
         startBackgroundRefreshIfStale()
         return snapshot()
     }
 
     public func perform(_ intent: Intent) async throws -> State {
-        try loadDraftIfMissing()
-        try loadCatalogFromDiskIfNeeded()
+        try await load()
         switch intent {
         case .typeBrainDump(let text):
             startBackgroundRefreshIfStale()
@@ -57,12 +71,88 @@ public actor Session {
         case .submit:
             startBackgroundRefreshIfStale()
             try await submit()
+        case .saveCredentials(let settings, let jiraToken, let modelKey):
+            try await saveCredentials(
+                settings: settings,
+                jiraToken: jiraToken,
+                modelKey: modelKey
+            )
+        case .enterProjectKey(let key):
+            try await enterProjectKey(key)
+        case .confirmProject(let mapping):
+            try await confirmProject(mapping: mapping)
         }
         return snapshot()
     }
 
+    private func load() async throws {
+        await refreshCompileStatus()
+        try loadSettingsFromDiskIfNeeded()
+        try loadProjectFromDiskIfNeeded()
+        try loadDraftIfMissing()
+        try loadCatalogFromDiskIfNeeded()
+    }
+
+    private func saveCredentials(
+        settings: Settings,
+        jiraToken: String,
+        modelKey: String
+    ) async throws {
+        guard !aneCompileInProgress else { return }
+        try await secrets.storeJiraToken(jiraToken)
+        try await secrets.storeModelKey(modelKey)
+        self.settings = settings
+        try persistSettings()
+    }
+
+    private func enterProjectKey(_ key: String) async throws {
+        guard settings != nil, !aneCompileInProgress else { return }
+        let types: [JiraIssueType]
+        do {
+            types = try await jira.fetchIssueTypes(projectKey: key)
+        } catch is JiraUnreachable {
+            return
+        }
+        let standard = types.filter(\.isStandard)
+        proposedProject = ProposedProject(
+            key: key,
+            mapping: TicketType.mapping(from: types),
+            standardJiraIssueTypes: standard.map(\.name)
+        )
+    }
+
+    private func confirmProject(mapping: [TicketType: String]) async throws {
+        guard let proposedProject, settings != nil, !aneCompileInProgress else { return }
+        project = Project(
+            key: proposedProject.key,
+            ticketTypeMapping: mapping,
+            terms: []
+        )
+        self.proposedProject = nil
+        textMaterialWarning = "Text Material is sent to the model provider."
+        try persistProject()
+        try await pullCatalogIfNeverPulled()
+    }
+
+    private func persistProject() throws {
+        guard let project, let folder = projectRoot() else { return }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let file = ProjectFile(
+            ticketTypeMapping: project.ticketTypeMapping,
+            terms: project.terms
+        )
+        try encoder.encode(file).write(to: folder.appending(component: "project.json"))
+    }
+
+    private func refreshCompileStatus() async {
+        aneCompileInProgress = await transcriber.compileStatus() == .inProgress
+    }
+
     private func submit() async throws {
         guard var draft, draft.key == nil,
+            let project,
             let jiraIssueType = project.ticketTypeMapping[draft.ticketType]
         else {
             return
@@ -100,6 +190,7 @@ public actor Session {
     private var refreshTask: Task<Void, Never>?
 
     private func pullCatalogIfNeverPulled() async throws {
+        guard let project else { return }
         guard catalogPulledAt == nil, !firstPullFailed else { return }
         do {
             try applySuccessfulPull(try await jira.pullCatalog(projectKey: project.key))
@@ -111,6 +202,7 @@ public actor Session {
     }
 
     private func startBackgroundRefreshIfStale() {
+        guard project != nil else { return }
         guard let catalogPulledAt else { return }
         guard Date().timeIntervalSince(catalogPulledAt) > catalogStaleAfter else { return }
         guard refreshTask == nil else { return }
@@ -119,6 +211,7 @@ public actor Session {
 
     private func refreshCatalog() async {
         defer { refreshTask = nil }
+        guard let project else { return }
         do {
             try applySuccessfulPull(try await jira.pullCatalog(projectKey: project.key))
         } catch {
@@ -135,7 +228,8 @@ public actor Session {
     private func loadCatalogFromDiskIfNeeded() throws {
         if catalogLoaded { return }
         catalogLoaded = true
-        let url = projectRoot().appending(component: "catalog.json")
+        guard let folder = projectRoot() else { return }
+        let url = folder.appending(component: "catalog.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -145,7 +239,7 @@ public actor Session {
     }
 
     private func persistCatalog() throws {
-        let folder = projectRoot()
+        guard let folder = projectRoot() else { return }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -161,6 +255,7 @@ public actor Session {
 
     private func generate() async throws {
         if draft?.key != nil { return }
+        guard let project else { return }
         let generated: GenerateReply
         let done: [String]
         do {
@@ -207,12 +302,64 @@ public actor Session {
 
     private func loadDraftIfMissing() throws {
         if draft != nil { return }
+        guard project != nil else { return }
         draft = try loadInProgressDraft()
     }
 
+    private var projectLoaded = false
+    private var settingsLoaded = false
+
+    private func loadSettingsFromDiskIfNeeded() throws {
+        if settingsLoaded { return }
+        settingsLoaded = true
+        let url = applicationSupport.appending(component: "settings.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        settings = try JSONDecoder().decode(Settings.self, from: Data(contentsOf: url))
+    }
+
+    private func persistSettings() throws {
+        guard let settings else { return }
+        try FileManager.default.createDirectory(
+            at: applicationSupport,
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(settings).write(
+            to: applicationSupport.appending(component: "settings.json")
+        )
+    }
+
+    private func loadProjectFromDiskIfNeeded() throws {
+        if projectLoaded { return }
+        projectLoaded = true
+        let root = applicationSupport.appending(component: "projects")
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        let folders = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        let keys = folders.compactMap { url -> String? in
+            guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            else { return nil }
+            return url.lastPathComponent
+        }.sorted()
+        guard let key = keys.first else { return }
+        let url = root.appending(component: key).appending(component: "project.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let file = try JSONDecoder().decode(ProjectFile.self, from: Data(contentsOf: url))
+        project = Project(
+            key: key,
+            ticketTypeMapping: file.ticketTypeMapping,
+            terms: file.terms
+        )
+    }
+
     private func loadInProgressDraft() throws -> Draft? {
-        let root = draftsRoot()
-        guard FileManager.default.fileExists(atPath: root.path) else { return nil }
+        guard let root = draftsRoot(),
+            FileManager.default.fileExists(atPath: root.path)
+        else { return nil }
         let folders = try FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -243,8 +390,8 @@ public actor Session {
     }
 
     private func persistDraft() throws {
-        guard let draft else { return }
-        let folder = draftFolder(id: draft.id)
+        guard let draft, let root = projectRoot() else { return }
+        let folder = root.appending(component: "drafts").appending(component: draft.id)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
         let sidecar = Sidecar(
@@ -265,30 +412,33 @@ public actor Session {
     }
 
     private func persistTranscript() throws {
-        guard let draft else { return }
+        guard let draft, let root = projectRoot() else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let line = try encoder.encode(TranscriptLine(role: "user", text: field))
         guard let jsonl = String(data: line, encoding: .utf8) else { return }
         try (jsonl + "\n").write(
-            to: draftFolder(id: draft.id).appending(component: "transcript.jsonl"),
+            to: root.appending(component: "drafts").appending(component: draft.id)
+                .appending(component: "transcript.jsonl"),
             atomically: true,
             encoding: .utf8
         )
     }
 
-    private func draftFolder(id: String) -> URL {
-        draftsRoot().appending(component: id)
+    private func draftsRoot() -> URL? {
+        projectRoot()?.appending(component: "drafts")
     }
 
-    private func draftsRoot() -> URL {
-        projectRoot().appending(component: "drafts")
-    }
-
-    private func projectRoot() -> URL {
-        applicationSupport
+    private func projectRoot() -> URL? {
+        guard let key = project?.key else { return nil }
+        return applicationSupport
             .appending(component: "projects")
-            .appending(component: project.key)
+            .appending(component: key)
+    }
+
+    private struct ProjectFile: Codable {
+        var ticketTypeMapping: [TicketType: String]
+        var terms: [String]
     }
 
     private struct Sidecar: Codable {
@@ -305,7 +455,16 @@ public actor Session {
     }
 
     private func snapshot() -> State {
-        State(field: field, draft: draft, catalog: catalog)
+        State(
+            field: field,
+            draft: draft,
+            catalog: catalog,
+            aneCompileInProgress: aneCompileInProgress,
+            settings: settings,
+            project: project,
+            proposedProject: proposedProject,
+            textMaterialWarning: textMaterialWarning
+        )
     }
 }
 

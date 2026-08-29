@@ -23,6 +23,32 @@ public struct Project: Equatable, Sendable {
     }
 }
 
+public struct Settings: Equatable, Sendable, Codable {
+    public var site: String
+    public var email: String
+    public var provider: String
+    public var modelId: String
+
+    public init(site: String, email: String, provider: String, modelId: String) {
+        self.site = site
+        self.email = email
+        self.provider = provider
+        self.modelId = modelId
+    }
+}
+
+public struct ProposedProject: Equatable, Sendable {
+    public var key: String
+    public var mapping: [TicketType: String]
+    public var standardJiraIssueTypes: [String]
+
+    public init(key: String, mapping: [TicketType: String], standardJiraIssueTypes: [String]) {
+        self.key = key
+        self.mapping = mapping
+        self.standardJiraIssueTypes = standardJiraIssueTypes
+    }
+}
+
 public struct Catalog: Equatable, Sendable, Codable {
     public var epics: [CatalogEpic]
     public var rows: [CatalogRow]
@@ -159,7 +185,7 @@ extension Catalog {
 
 extension TicketType {
     public static func mapping(from jiraIssueTypes: [JiraIssueType]) -> [TicketType: String] {
-        let standard = jiraIssueTypes.filter { !$0.subtask && $0.hierarchyLevel == 0 }
+        let standard = jiraIssueTypes.filter(\.isStandard)
         let fallback = standard.first?.name ?? "Task"
         func matchingJiraName(_ name: String) -> String {
             standard.first { $0.name.compare(name, options: .caseInsensitive) == .orderedSame }?

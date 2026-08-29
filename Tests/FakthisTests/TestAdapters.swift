@@ -6,6 +6,45 @@ struct ModelCompleteRequest: Equatable, Sendable {
     var user: String
 }
 
+actor FakeTranscriber: Transcriber {
+    private var compileFinished: Bool
+
+    init(compileFinished: Bool) {
+        self.compileFinished = compileFinished
+    }
+
+    func finishCompile() {
+        compileFinished = true
+    }
+
+    func compileStatus() async -> CompileStatus {
+        compileFinished ? .done : .inProgress
+    }
+}
+
+actor FakeSecrets: Secrets {
+    private var storedJiraToken: String?
+    private var storedModelKey: String?
+
+    func storeJiraToken(_ token: String) async throws {
+        storedJiraToken = token
+    }
+
+    func storeModelKey(_ key: String) async throws {
+        storedModelKey = key
+    }
+
+    func jiraToken() async throws -> String {
+        guard let storedJiraToken else { throw SecretAccessFailed() }
+        return storedJiraToken
+    }
+
+    func modelKey() async throws -> String {
+        guard let storedModelKey else { throw SecretAccessFailed() }
+        return storedModelKey
+    }
+}
+
 actor ScriptedModel: Model {
     var reply: GenerateReply
     let definitionOfDone: [String]
@@ -79,6 +118,7 @@ actor FakeJira: Jira {
     private var seededEpics: [SeededEpic] = []
     private var seededIssues: [SeededIssue] = []
     private var seededComponentNames: [String] = []
+    private var seededIssueTypes: [JiraIssueType] = []
 
     private var holdPulls = false
     private var pullWaiters: [CheckedContinuation<Void, Never>] = []
@@ -129,7 +169,7 @@ actor FakeJira: Jira {
 
     func fetchIssueTypes(projectKey: String) async throws -> [JiraIssueType] {
         if unreachable { throw JiraUnreachable() }
-        return []
+        return seededIssueTypes
     }
 
     func fetchRewriteTarget(key: TicketKey) async throws -> RewriteTarget {
@@ -180,6 +220,10 @@ actor FakeJira: Jira {
         seededEpics = epics
         seededIssues = issues
         seededComponentNames = componentNames
+    }
+
+    func seedIssueTypes(_ types: [JiraIssueType]) {
+        seededIssueTypes = types
     }
 
     func setHoldPulls(_ value: Bool) {

@@ -4,6 +4,26 @@ public protocol Model: Sendable {
     func complete(system: String, user: String) async throws -> String
 }
 
+public protocol Transcriber: Sendable {
+    func compileStatus() async -> CompileStatus
+}
+
+public enum CompileStatus: Sendable {
+    case inProgress
+    case done
+}
+
+public protocol Secrets: Sendable {
+    func storeJiraToken(_ token: String) async throws
+    func storeModelKey(_ key: String) async throws
+    func jiraToken() async throws -> String
+    func modelKey() async throws -> String
+}
+
+public struct SecretAccessFailed: Error {
+    public init() {}
+}
+
 public protocol Jira: Sendable {
     func createTicket(
         projectKey: String,
@@ -58,6 +78,8 @@ public struct JiraIssueType: Equatable, Sendable {
         self.hierarchyLevel = hierarchyLevel
         self.subtask = subtask
     }
+
+    public var isStandard: Bool { !subtask && hierarchyLevel == 0 }
 }
 
 public struct RewriteTarget: Equatable, Sendable {

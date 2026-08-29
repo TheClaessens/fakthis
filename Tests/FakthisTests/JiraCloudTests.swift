@@ -2,6 +2,33 @@ import Foundation
 import Testing
 import Fakthis
 
+@Test func jiraCloudReadsAPITokenAtCallTime() async throws {
+    let http = ScriptedHTTP()
+    await http.queue(status: 200, json: #"{"issueTypes":[]}"#)
+    await http.queue(status: 200, json: #"{"issueTypes":[]}"#)
+    actor Token {
+        var value = "secret-token"
+        func set(_ value: String) { self.value = value }
+    }
+    let token = Token()
+    let jira = JiraCloud(
+        host: "faktion.atlassian.net",
+        email: "pm@faktion.com",
+        apiToken: { await token.value },
+        send: { try await http.send($0) }
+    )
+
+    _ = try await jira.fetchIssueTypes(projectKey: "FAK")
+    await token.set("rotated-token")
+    _ = try await jira.fetchIssueTypes(projectKey: "FAK")
+
+    let second = try #require(await http.requests.last)
+    #expect(
+        second.value(forHTTPHeaderField: "Authorization") == "Basic "
+            + Data("pm@faktion.com:rotated-token".utf8).base64EncodedString()
+    )
+}
+
 @Test func jiraCloudCreatePostsWikiMarkupToV2IssueWithoutNotifyUsers() async throws {
     let http = ScriptedHTTP()
     await http.queue(status: 201, json: #"{"id":"10001","key":"FAK-1"}"#)
@@ -385,7 +412,7 @@ import Fakthis
     let jira = JiraCloud(
         host: "faktion.atlassian.net",
         email: "pm@faktion.com",
-        apiToken: "secret-token",
+        apiToken: { "secret-token" },
         send: { _ in throw URLError(.cannotFindHost) }
     )
     await #expect(throws: JiraUnreachable.self) {
@@ -422,7 +449,7 @@ private func jiraCloud(_ http: ScriptedHTTP) -> JiraCloud {
     JiraCloud(
         host: "faktion.atlassian.net",
         email: "pm@faktion.com",
-        apiToken: "secret-token",
+        apiToken: { "secret-token" },
         send: { try await http.send($0) }
     )
 }

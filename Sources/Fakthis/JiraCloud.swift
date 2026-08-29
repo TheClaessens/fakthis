@@ -3,13 +3,13 @@ import Foundation
 public actor JiraCloud: Jira {
     private let host: String
     private let email: String
-    private let apiToken: String
+    private let apiToken: @Sendable () async throws -> String
     private let send: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     public init(
         host: String,
         email: String,
-        apiToken: String,
+        apiToken: @escaping @Sendable () async throws -> String,
         send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)
     ) {
         self.host = host
@@ -25,7 +25,7 @@ public actor JiraCloud: Jira {
         jiraIssueType: String,
         parentKey: TicketKey?
     ) async throws -> TicketKey {
-        var request = try authorizedRequest(path: "/rest/api/2/issue", method: "POST")
+        var request = try await authorizedRequest(path: "/rest/api/2/issue", method: "POST")
         request.httpBody = try JSONEncoder().encode(
             CreateIssueBody(
                 fields: CreateIssueFields(
@@ -48,7 +48,7 @@ public actor JiraCloud: Jira {
         descriptionWiki: String,
         completenessMarker: CompletenessMarker
     ) async throws {
-        var request = try authorizedRequest(
+        var request = try await authorizedRequest(
             path: "/rest/api/2/issue/\(key.value)",
             method: "PUT"
         )
@@ -64,7 +64,7 @@ public actor JiraCloud: Jira {
     }
 
     public func attachmentPolicy() async throws -> AttachmentPolicy {
-        let request = try authorizedRequest(
+        let request = try await authorizedRequest(
             path: "/rest/api/3/attachment/meta",
             method: "GET"
         )
@@ -81,7 +81,7 @@ public actor JiraCloud: Jira {
         data: Data
     ) async throws {
         let boundary = "fakthis-\(UUID().uuidString)"
-        var request = try authorizedRequest(
+        var request = try await authorizedRequest(
             path: "/rest/api/2/issue/\(key.value)/attachments",
             method: "POST"
         )
@@ -107,7 +107,7 @@ public actor JiraCloud: Jira {
     }
 
     public func fetchIssueTypes(projectKey: String) async throws -> [JiraIssueType] {
-        let request = try authorizedRequest(
+        let request = try await authorizedRequest(
             path: "/rest/api/3/issue/createmeta/\(projectKey)/issuetypes",
             method: "GET"
         )
@@ -119,7 +119,7 @@ public actor JiraCloud: Jira {
     }
 
     public func fetchRewriteTarget(key: TicketKey) async throws -> RewriteTarget {
-        let request = try authorizedRequest(
+        let request = try await authorizedRequest(
             path: "/rest/api/2/issue/\(key.value)",
             method: "GET"
         )
@@ -143,7 +143,7 @@ public actor JiraCloud: Jira {
     }
 
     public func createBlocksLink(blocker: TicketKey, blocked: TicketKey) async throws {
-        var request = try authorizedRequest(path: "/rest/api/2/issueLink", method: "POST")
+        var request = try await authorizedRequest(path: "/rest/api/2/issueLink", method: "POST")
         request.httpBody = try JSONEncoder().encode(
             IssueLinkBody(
                 type: .init(name: "Blocks"),
@@ -201,7 +201,7 @@ public actor JiraCloud: Jira {
             if let nextPageToken {
                 query.append(URLQueryItem(name: "nextPageToken", value: nextPageToken))
             }
-            let request = try authorizedRequest(
+            let request = try await authorizedRequest(
                 path: "/rest/api/3/search/jql",
                 method: "GET",
                 query: query
@@ -230,7 +230,7 @@ public actor JiraCloud: Jira {
     }
 
     private func bulkFetchPage(keys: [String], fields: [String]) async throws -> [SearchedIssue] {
-        var request = try authorizedRequest(path: "/rest/api/3/issue/bulkfetch", method: "POST")
+        var request = try await authorizedRequest(path: "/rest/api/3/issue/bulkfetch", method: "POST")
         request.httpBody = try JSONEncoder().encode(
             BulkFetchBody(issueIdsOrKeys: keys, fields: fields)
         )
@@ -251,7 +251,7 @@ public actor JiraCloud: Jira {
     }
 
     private func fetchComponentNames(projectKey: String) async throws -> [String] {
-        let request = try authorizedRequest(
+        let request = try await authorizedRequest(
             path: "/rest/api/3/project/\(projectKey)/components",
             method: "GET"
         )
@@ -264,7 +264,7 @@ public actor JiraCloud: Jira {
         path: String,
         method: String,
         query: [URLQueryItem] = []
-    ) throws -> URLRequest {
+    ) async throws -> URLRequest {
         var components = URLComponents()
         components.scheme = "https"
         components.host = host
@@ -281,7 +281,7 @@ public actor JiraCloud: Jira {
         if method != "GET" {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let token = Data("\(email):\(apiToken)".utf8).base64EncodedString()
+        let token = Data("\(email):\(try await apiToken())".utf8).base64EncodedString()
         request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
         return request
     }
