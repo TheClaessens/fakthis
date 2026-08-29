@@ -48,13 +48,14 @@ public actor Session {
     public struct State: Equatable, Sendable {
         public var field: String
         public var draft: Draft?
+        public var transcript: [TranscriptLine]
         public var material: [AttachedMaterial]
         public var catalog: Catalog
+        public var catalogRefreshFailed: Bool
         public var aneCompileInProgress: Bool
         public var settings: Settings?
         public var project: Project?
         public var proposedProject: ProposedProject?
-        public var textMaterialWarning: String?
         public var materialWarnings: [String]
         public var failedUploads: [String]
         public var structuralWarnings: [String]
@@ -75,14 +76,15 @@ public actor Session {
 
     private var field = ""
     private var draft: Draft?
+    private var transcript: [TranscriptLine] = []
     private var draftId: String?
     private var material: [Material] = []
     private var blockedUploads: Set<String> = []
     private var catalog = Catalog()
+    private var catalogRefreshFailed = false
     private var aneCompileInProgress = true
     private var settings: Settings?
     private var proposedProject: ProposedProject?
-    private var textMaterialWarning: String?
     private var materialWarnings: [String] = []
     private var failedUploads: [String] = []
     private var duplicateInterrupt: DuplicateHit?
@@ -262,7 +264,6 @@ public actor Session {
             terms: []
         )
         self.proposedProject = nil
-        textMaterialWarning = "Text Material is sent to the model provider."
         try persistProject()
         try await pullCatalogIfNeverPulled()
     }
@@ -517,14 +518,23 @@ public actor Session {
         refreshTask = Task { await self.refreshCatalog() }
     }
 
+    /// A background refresh that fails is a warning on state, never a block: Generate keeps
+    /// running against the last good snapshot (§5, §9). The flag describes the snapshot in
+    /// hand, so a later refresh that lands clears it.
     private func refreshCatalog() async {
         defer { refreshTask = nil }
         guard let project else { return }
+        let pulled: Catalog
         do {
-            try applySuccessfulPull(try await jira.pullCatalog(projectKey: project.key))
+            pulled = try await jira.pullCatalog(projectKey: project.key)
         } catch {
+            catalogRefreshFailed = true
             return
         }
+        // The flag describes the snapshot in hand. The pull landed, so the snapshot is fresh
+        // even if writing it to disk does not work — that is a different failure.
+        catalogRefreshFailed = false
+        try? applySuccessfulPull(pulled)
     }
 
     private func applySuccessfulPull(_ pulled: Catalog) throws {
@@ -563,9 +573,6 @@ public actor Session {
 
     private func attach(_ item: Material) async throws {
         guard project != nil else { return }
-        if item.isText {
-            textMaterialWarning = "Text Material is sent to the model provider."
-        }
         if item.isMedia {
             do {
                 let policy = try await jira.attachmentPolicy()
@@ -902,6 +909,7 @@ public actor Session {
         }
         showLive(target)
         material = liveMaterial()
+        transcript = []
         let id = UUID().uuidString
         draftId = id
         draft = Draft(
@@ -1039,6 +1047,7 @@ public actor Session {
         failedUploads = stored.failedUploads
         blockedUploads = []
         material = try loadMaterial()
+        loadTranscript(draftId: id)
         field = fieldByDraft[id] ?? field
     }
 
@@ -1275,7 +1284,7 @@ public actor Session {
         )
         try persistDraft()
         try persistMaterial()
-        try persistTranscript()
+        try recordTurn(said: field, asked: generated.openQuestions)
         refreshBatchSiblings()
         try refreshMatches()
     }
@@ -1485,6 +1494,7 @@ public actor Session {
             failedUploads = stored.failedUploads
             rewrite = stored.rewrite
             fetched = stored.fetched
+            loadTranscript(draftId: stored.draft.id)
             return
         }
         try loadPendingMaterial()
@@ -1791,16 +1801,49 @@ public actor Session {
         )
     }
 
+    /// Both sides of one press: what the PM said, then what the agent asked back. The agent's
+    /// turn is its open questions — those are the only thing it says to the PM; everything else
+    /// it produces is the Draft, which the window already shows.
+    ///
+    /// One line per question, so the window renders them as the separate things they are. The
+    /// agent hands back its whole open list every press, so a question the PM has not answered
+    /// comes back unchanged: asking it again is the model repeating itself, not a new turn.
+    private func recordTurn(said: String, asked: [String]) throws {
+        if !said.isEmpty {
+            transcript.append(TranscriptLine(role: .pm, text: said))
+        }
+        let alreadyAsked = Set(transcript.filter { $0.role == .agent }.map(\.text))
+        for question in asked where !alreadyAsked.contains(question) {
+            transcript.append(TranscriptLine(role: .agent, text: question))
+        }
+        try persistTranscript()
+    }
+
+    private func transcriptURL(draftId: String) -> URL? {
+        draftsRoot()?.appending(component: draftId).appending(component: "transcript.jsonl")
+    }
+
     private func persistTranscript() throws {
-        guard let draft, let root = projectRoot() else { return }
+        guard let draft, let url = transcriptURL(draftId: draft.id) else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let line = try encoder.encode(TranscriptLine(role: "user", text: field))
-        guard let jsonl = String(data: line, encoding: .utf8) else { return }
-        let url = root.appending(component: "drafts").appending(component: draft.id)
-            .appending(component: "transcript.jsonl")
-        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        try (existing + jsonl + "\n").write(to: url, atomically: true, encoding: .utf8)
+        let jsonl = try transcript.map { line in
+            String(decoding: try encoder.encode(line), as: UTF8.self)
+        }
+        try (jsonl.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Replaces the conversation rather than adding to it: the transcript on screen is always
+    /// the focused Draft's, and a Draft with no chat yet has an empty one.
+    private func loadTranscript(draftId: String) {
+        transcript = []
+        guard let url = transcriptURL(draftId: draftId),
+            let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return }
+        let decoder = JSONDecoder()
+        transcript = text.split(separator: "\n").compactMap {
+            try? decoder.decode(TranscriptLine.self, from: Data($0.utf8))
+        }
     }
 
     private func draftsRoot() -> URL? {
@@ -1898,11 +1941,6 @@ public actor Session {
         }
     }
 
-    private struct TranscriptLine: Codable {
-        var role: String
-        var text: String
-    }
-
     private struct BatchFile: Codable {
         var name: String
         var draftIds: [String]
@@ -1926,13 +1964,14 @@ public actor Session {
         State(
             field: field,
             draft: draft,
+            transcript: transcript,
             material: material.map(\.attached),
             catalog: catalog,
+            catalogRefreshFailed: catalogRefreshFailed,
             aneCompileInProgress: aneCompileInProgress,
             settings: settings,
             project: project,
             proposedProject: proposedProject,
-            textMaterialWarning: textMaterialWarning,
             materialWarnings: materialWarnings,
             failedUploads: failedUploads,
             structuralWarnings: structuralWarningsForSnapshot(),

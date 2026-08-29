@@ -1788,9 +1788,7 @@ import Fakthis
     #expect(state.project == nil)
 }
 
-@Test func confirmingAProjectStoresMappingEmptyTermsPullsCatalogAndWarnsAboutTextMaterial()
-    async throws
-{
+@Test func confirmingAProjectStoresMappingAndEmptyTermsAndPullsCatalog() async throws {
     let harness = Harness(seedProject: false)
     await harness.jira.seedIssueTypes([
         JiraIssueType(name: "Epic", hierarchyLevel: 1, subtask: false),
@@ -1800,7 +1798,11 @@ import Fakthis
         JiraIssueType(name: "Sub-task", hierarchyLevel: -1, subtask: true),
     ])
     _ = try await harness.session.perform(firstLaunchCredentials)
-    _ = try await harness.session.perform(.enterProjectKey("FAK"))
+    let proposal = try await harness.session.perform(.enterProjectKey("FAK"))
+    #expect(
+        proposal.proposedProject?.textMaterialWarning
+            == "Text Material is sent to the model provider."
+    )
     let overridden: [TicketType: String] = [
         .story: "Story",
         .bug: "Bug",
@@ -1815,7 +1817,6 @@ import Fakthis
     #expect(state.proposedProject == nil)
     #expect(state.catalog.rows.isEmpty)
     #expect(state.catalog.epics.isEmpty)
-    #expect(state.textMaterialWarning == "Text Material is sent to the model provider.")
 
     let onDisk = try JSONDecoder().decode(
         DiskProject.self,
@@ -2544,7 +2545,6 @@ import Fakthis
             )
         )
     )
-    #expect(attached.textMaterialWarning == "Text Material is sent to the model provider.")
     #expect(await harness.jira.attachmentPolicyCalls == 0)
 
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
@@ -3626,6 +3626,18 @@ private enum StoryReply {
     static let definitionOfDone = "Pick screen requires a bin scan before items are taken"
     static let brainDump =
         "we need pickers to scan the bin before they pick so they don't grab from the wrong place"
+
+    /// The same Story reply, with the agent asking something back — what a Draft looks like
+    /// when there is a conversation to read.
+    static func asking(_ questions: String...) -> GenerateReply {
+        GenerateReply(
+            ticketType: .story,
+            title: title,
+            shortLabel: shortLabel,
+            description: firstPassDescription,
+            openQuestions: questions
+        )
+    }
 }
 
 private struct Harness {
@@ -3809,4 +3821,243 @@ private struct Harness {
 private struct DiskProject: Codable {
     var ticketTypeMapping: [TicketType: String]
     var terms: [String]
+}
+
+// MARK: - #30 Session.State carries what a window needs
+
+@Test func theConversationIsReadableFromStateWithBothSidesOfTheChat() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+
+    #expect(
+        generated.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+        ]
+    )
+}
+
+@Test func restartRestoresTheInProgressDraftAndItsConversation() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draftId = try #require(generated.draft?.id)
+
+    let restored = try await harness.reopen().state()
+
+    #expect(restored.draft?.id == draftId)
+    #expect(restored.draft?.title == StoryReply.title)
+    #expect(
+        restored.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+        ]
+    )
+}
+
+@Test func aFailedBackgroundCatalogRefreshIsAFlagOnStateAndGenerateRunsOnTheLastGoodPull()
+    async throws
+{
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date().addingTimeInterval(-3601),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress")
+        ],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: TicketKey("FAK-100"),
+                status: "To Do"
+            )
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.jira.setUnreachable(true)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+
+    // The stale snapshot is what Generate saw — a failed refresh warns, it never blocks.
+    #expect(generated.catalog.rows.first?.title == "Scan tote before pick")
+    #expect(generated.draft?.title == StoryReply.title)
+
+    try await waitUntil { try await harness.session.state().catalogRefreshFailed }
+
+    // The pull is still stale, so the next look starts another refresh. One that lands
+    // clears the warning — it is a warning about the snapshot, not a scar.
+    await harness.jira.setUnreachable(false)
+    try await waitUntil { try await harness.session.state().catalogRefreshFailed == false }
+}
+
+@Test func theProviderWarningRidesTheProposedProjectAndAttachingTextMaterialNeverRaisesIt()
+    async throws
+{
+    // Setup-time only, at Project confirmation (§3.5). It rides the proposal the PM is being
+    // asked to confirm, so it is read once and has nowhere to reappear in the Draft.
+    let harness = Harness(seedProject: false)
+    await harness.jira.seedIssueTypes([
+        JiraIssueType(name: "Epic", hierarchyLevel: 1, subtask: false),
+        JiraIssueType(name: "Story", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Bug", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Chore", hierarchyLevel: 0, subtask: false),
+    ])
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    let proposed = try await harness.session.perform(.enterProjectKey("FAK"))
+    #expect(
+        proposed.proposedProject?.textMaterialWarning
+            == "Text Material is sent to the model provider."
+    )
+
+    let confirmed = try await harness.session.perform(
+        .confirmProject(mapping: [.story: "Story", .bug: "Bug", .chore: "Chore"])
+    )
+    // Confirmation clears the proposal, and with it the only thing that carried the warning.
+    #expect(confirmed.proposedProject == nil)
+
+    let attached = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "client-email.txt",
+                mimeType: "text/plain",
+                data: Data("We need pickers to scan the bin.".utf8)
+            )
+        )
+    )
+    #expect(attached.material.count == 1)
+}
+
+@Test func aChatAnswerJoinsTheConversationAfterTheQuestionItAnswers() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+
+    await harness.model.replaceReply(StoryReply.asking())
+    _ = try await harness.session.perform(.typeBrainDump("The current basket, on load."))
+    let answered = try await harness.session.perform(.send)
+
+    #expect(
+        answered.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+            TranscriptLine(role: .pm, text: "The current basket, on load."),
+        ]
+    )
+}
+
+@Test func theConversationFollowsTheFocusedBatchSibling() async throws {
+    // §11: each Draft in a Batch is full — its own Ticket type, its own chat. A conversation
+    // that stayed behind on a focus switch would show the wrong Draft's questions.
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: "scan bin",
+            description: StoryReply.firstPassDescription,
+            openQuestions: ["Which basket does the summary read?"]
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(.generate)
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: ["Which format does the export need?"]
+        )
+    )
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    _ = try await harness.session.perform(.typeBrainDump("export the totals nightly"))
+    let onChore = try await harness.session.perform(.generate)
+
+    #expect(
+        onChore.transcript == [
+            TranscriptLine(role: .pm, text: "export the totals nightly"),
+            TranscriptLine(role: .agent, text: "Which format does the export need?"),
+        ]
+    )
+
+    let back = try await harness.session.perform(.focusDraft(firstId))
+    #expect(
+        back.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+        ]
+    )
+}
+
+@Test func aRewriteStartsOnAnEmptyConversationNotTheCreateDraftsChat() async throws {
+    // A rewrite is a new Draft bound to the key (§12). Carrying the create Draft's chat into it
+    // would put questions about a different Ticket in the conversation, and persist them there.
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let created = try await harness.session.perform(.generate)
+    #expect(created.transcript.count == 2)
+
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-500",
+                title: "Export totals nightly",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_200),
+                body: "The nightly export drops the last row.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    let rewriting = try await harness.session.perform(.pasteKey("FAK-500"))
+
+    #expect(rewriting.rewrite != nil)
+    #expect(rewriting.transcript.isEmpty)
+}
+
+@Test func aQuestionStillOpenAfterASendIsNotAskedTwiceInTheConversation() async throws {
+    // The agent hands back its whole open-questions list every press, so a question the PM has
+    // not answered comes back unchanged. The conversation must show it as one thing it asked,
+    // not once per press.
+    let harness = Harness()
+    await harness.model.replaceReply(
+        StoryReply.asking("Which basket does the summary read?", "Does it reach the payment step?")
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+
+    await harness.model.replaceReply(
+        StoryReply.asking("Does it reach the payment step?", "Which format does the export need?")
+    )
+    _ = try await harness.session.perform(.typeBrainDump("The current basket, on load."))
+    let answered = try await harness.session.perform(.send)
+
+    #expect(
+        answered.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+            TranscriptLine(role: .agent, text: "Does it reach the payment step?"),
+            TranscriptLine(role: .pm, text: "The current basket, on load."),
+            TranscriptLine(role: .agent, text: "Which format does the export need?"),
+        ]
+    )
 }

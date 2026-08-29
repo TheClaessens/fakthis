@@ -42,6 +42,14 @@ public struct ProposedProject: Equatable, Sendable {
     public var mapping: [TicketType: String]
     public var standardJiraIssueTypes: [String]
 
+    /// The one disclosure that text Material goes to the model provider (ADR-0001, §3.5).
+    /// It belongs to the proposal the PM confirms, not to the Draft. Instance-scoped on purpose:
+    /// it lives exactly as long as the unconfirmed proposal does, and `Session` clears
+    /// `proposedProject` at confirmation — so no Draft, and no later moment, can reach it.
+    public var textMaterialWarning: String {
+        "Text Material is sent to the model provider."
+    }
+
     public init(key: String, mapping: [TicketType: String], standardJiraIssueTypes: [String]) {
         self.key = key
         self.mapping = mapping
@@ -397,5 +405,25 @@ extension TicketType {
             .bug: matchingJiraName("Bug"),
             .chore: matchingJiraName("Chore"),
         ]
+    }
+}
+
+/// One turn of the chat, in the order it was said. `Session` has always written these to disk;
+/// this is the same line, readable, so the conversation can be on screen instead of only in the
+/// Draft folder.
+public struct TranscriptLine: Equatable, Sendable, Codable {
+    /// The two voices in the chat. Encoded as the strings already on disk, so a Draft written
+    /// before this type existed still reads back.
+    public enum Role: String, Equatable, Sendable, Codable {
+        case pm = "user"
+        case agent
+    }
+
+    public var role: Role
+    public var text: String
+
+    public init(role: Role, text: String) {
+        self.role = role
+        self.text = text
     }
 }
