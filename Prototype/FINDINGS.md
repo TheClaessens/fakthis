@@ -182,9 +182,9 @@ dump, not a browsable rail.
 It also makes §7's "Generate is a **separate press**" structural rather than stated: on the
 front door there is nothing else to press.
 
-Open question the front door does not answer: with no rail before Generate, Batch and Rewrite
-become toolbar links. That is probably right — you choose the surface before you have anything
-— but it is a decision, not a detail.
+With no rail before Generate, Batch and Rewrite have nowhere to live. **Decided: they are two
+buttons in the toolbar.** You choose the surface before you have anything to put on it, so they
+do not need the rail.
 
 **13. Removing Submit is the fix, not disabling it.** All three styles simply have no Submit
 pre-Generate, and first-pass finding 1 evaporates. A disabled Submit would still be answering
@@ -220,5 +220,8 @@ spare. This is the strongest single screenshot in either pass.
 
 **19. The duplicate still renders twice** — once in the conversation, once in the panel
 (`c2-3-signals.png`). Confirms first-pass finding 4: this is not a layout problem, and no
-placement fixes it. It needs the decision that a duplicate is a conversation event which leaves
-a gutter mark, and never a signal row.
+placement fixes it.
+
+**Decided: a duplicate is a conversation event that leaves a gutter mark. It is never a signal
+row.** Low priority — the duplicate matcher is not built yet, so revisit during dogfooding if
+the single placement turns out to be wrong in use.
