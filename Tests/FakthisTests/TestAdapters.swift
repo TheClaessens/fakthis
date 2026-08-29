@@ -52,6 +52,7 @@ actor ScriptedModel: Model {
     var failGenerate = false
     private(set) var completeRequests: [ModelCompleteRequest] = []
     private var awaitingDefinitionOfDone = false
+    private var rawReply: String?
 
     init(reply: GenerateReply, definitionOfDone: [String]) {
         self.reply = reply
@@ -60,6 +61,11 @@ actor ScriptedModel: Model {
 
     func replaceReply(_ reply: GenerateReply) {
         self.reply = reply
+        rawReply = nil
+    }
+
+    func replaceRawReply(_ json: String) {
+        rawReply = json
     }
 
     func setFailGenerate(_ value: Bool) {
@@ -76,6 +82,7 @@ actor ScriptedModel: Model {
             return try jsonString(definitionOfDone)
         }
         awaitingDefinitionOfDone = true
+        if let rawReply { return rawReply }
         return try jsonString(reply)
     }
 }

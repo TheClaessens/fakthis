@@ -8,6 +8,7 @@ public actor Session {
         case attachMaterial(Material)
         case generate
         case send
+        case changeTicketType(TicketType)
         case submit
         case retryUploads
         case skipFailedUploads
@@ -86,6 +87,9 @@ public actor Session {
         case .send:
             startBackgroundRefreshIfStale()
             try await send()
+        case .changeTicketType(let ticketType):
+            startBackgroundRefreshIfStale()
+            try await changeTicketType(ticketType)
         case .submit:
             startBackgroundRefreshIfStale()
             try await submit()
@@ -376,44 +380,73 @@ public actor Session {
         guard project != nil else { return }
         try await reviseDraft(
             user: generateUserMessage(),
-            instruction: draftJSONInstruction,
+            instruction: generateInstruction,
             screenshots: material.filter(\.isScreenshot)
         )
     }
 
     private func generateUserMessage() -> String {
-        let texts = material.filter(\.isText)
-        guard !texts.isEmpty else { return field }
-        let blocks = texts.map { item in
-            let body = String(data: item.data, encoding: .utf8) ?? ""
-            return "\(item.filename)\n\(body)"
-        }
+        let blocks = textMaterialBlocks()
+        guard !blocks.isEmpty else { return field }
         return ([field] + blocks).joined(separator: "\n\n")
     }
 
     private func send() async throws {
         guard let draft, draft.key == nil, project != nil else { return }
-        let questions = draft.openQuestions.joined(separator: "\n")
         try await reviseDraft(
-            user: """
-                Chat answer:
-                \(field)
-
-                Current title: \(draft.title)
-                Current short label: \(draft.shortLabel)
-                Current description:
-                \(draft.description)
-                Open questions:
-                \(questions)
-                """,
+            user: draftAndAnswerMessage(draft),
             instruction: sendInstruction,
             screenshots: []
         )
     }
 
-    private func reviseDraft(user: String, instruction: String, screenshots: [Material])
-        async throws
-    {
+    private func changeTicketType(_ ticketType: TicketType) async throws {
+        guard let draft, draft.key == nil, project != nil else { return }
+        try await reviseDraft(
+            user: reshapeUserMessage(draft),
+            instruction: reshapeInstruction(ticketType),
+            screenshots: material.filter(\.isScreenshot),
+            ticketType: ticketType
+        )
+    }
+
+    private func draftAndAnswerMessage(_ draft: Draft) -> String {
+        """
+        Chat answer:
+        \(field)
+
+        \(currentDraftBlock(draft))
+        """
+    }
+
+    private func reshapeUserMessage(_ draft: Draft) -> String {
+        ([currentDraftBlock(draft), field] + textMaterialBlocks()).joined(separator: "\n\n")
+    }
+
+    private func currentDraftBlock(_ draft: Draft) -> String {
+        """
+        Current title: \(draft.title)
+        Current short label: \(draft.shortLabel)
+        Current description:
+        \(draft.description)
+        Open questions:
+        \(draft.openQuestions.joined(separator: "\n"))
+        """
+    }
+
+    private func textMaterialBlocks() -> [String] {
+        material.filter(\.isText).map { item in
+            let body = String(data: item.data, encoding: .utf8) ?? ""
+            return "\(item.filename)\n\(body)"
+        }
+    }
+
+    private func reviseDraft(
+        user: String,
+        instruction: String,
+        screenshots: [Material],
+        ticketType: TicketType? = nil
+    ) async throws {
         guard let project else { return }
         let generated: GenerateReply
         let done: [String]
@@ -453,7 +486,7 @@ public actor Session {
         draftId = id
         draft = Draft(
             id: id,
-            ticketType: generated.ticketType,
+            ticketType: ticketType ?? generated.ticketType,
             title: generated.title,
             shortLabel: generated.shortLabel,
             description: description,
@@ -761,34 +794,6 @@ public actor Session {
         var text: String
     }
 
-    private func structuralCheck(_ draft: Draft) -> [String] {
-        var warnings: [String] = []
-        if draft.ticketType == .story, !draft.title.hasPrefix("As a ") {
-            warnings.append("title does not match the Story convention")
-        }
-        if !draft.description.contains("---")
-            || !draft.description.contains("- ")
-        {
-            warnings.append("a Definition of Done is missing")
-        }
-        let forbidden = ["Requirements", "Technical Notes", "Dependencies", "Out of Scope"]
-        for line in draft.description.split(separator: "\n", omittingEmptySubsequences: false) {
-            var heading = line.trimmingCharacters(in: .whitespaces)
-            while heading.hasPrefix("#") {
-                heading = heading.dropFirst().trimmingCharacters(in: .whitespaces)
-            }
-            if forbidden.contains(where: { heading.compare($0, options: .caseInsensitive) == .orderedSame })
-            {
-                warnings.append("description contains a forbidden heading")
-                break
-            }
-        }
-        if draft.description.utf8.count > 1_048_576 {
-            warnings.append("description exceeds the field cap")
-        }
-        return warnings
-    }
-
     private func descriptionForSubmit(_ draft: Draft) -> String {
         guard !draft.openQuestions.isEmpty else { return draft.description }
         let bullets = draft.openQuestions.map { "- \($0)" }.joined(separator: "\n")
@@ -814,12 +819,132 @@ public actor Session {
             textMaterialWarning: textMaterialWarning,
             materialWarnings: materialWarnings,
             failedUploads: failedUploads,
-            structuralWarnings: draft.map(structuralCheck) ?? []
+            structuralWarnings: draft.map(structuralWarnings(for:)) ?? []
         )
     }
 }
 
 private let completenessPreamble = "The reporter skipped these questions:"
+
+private func structuralWarnings(for draft: Draft) -> [String] {
+    titleConventionWarnings(draft) + typeShapeWarnings(draft) + descriptionWarnings(draft.description)
+}
+
+private func titleConventionWarnings(_ draft: Draft) -> [String] {
+    switch draft.ticketType {
+    case .story:
+        draft.title.hasPrefix("As a ")
+            ? [] : ["title does not match the Story convention"]
+    case .bug:
+        isPersonaOrBlankTitle(draft.title)
+            ? ["title does not match the Bug convention"] : []
+    case .chore:
+        isPersonaOrBlankTitle(draft.title)
+            ? ["title does not match the Chore convention"] : []
+    }
+}
+
+private func isPersonaOrBlankTitle(_ title: String) -> Bool {
+    title.hasPrefix("As a ") || title.trimmingCharacters(in: .whitespaces).isEmpty
+}
+
+private func typeShapeWarnings(_ draft: Draft) -> [String] {
+    guard draft.ticketType == .bug else { return [] }
+    var warnings: [String] = []
+    if !hasBrokenStatement(draft.description) {
+        warnings.append("Bug is missing a statement of what is broken")
+    }
+    if !hasNumberedSteps(draft.description) {
+        warnings.append("Bug is missing steps to reproduce")
+    }
+    if !hasLabeledLine(draft.description, "Expected")
+        || !hasLabeledLine(draft.description, "Actual")
+    {
+        warnings.append("Bug is missing Expected against Actual")
+    }
+    if !hasLabeledLine(draft.description, "Environment") {
+        warnings.append("Bug is missing Environment")
+    }
+    return warnings
+}
+
+private func descriptionWarnings(_ description: String) -> [String] {
+    var warnings: [String] = []
+    if !description.contains("---") || !description.contains("- ") {
+        warnings.append("a Definition of Done is missing")
+    }
+    let forbidden = ["Requirements", "Technical Notes", "Dependencies", "Out of Scope"]
+    var hasMarkdownHeading = false
+    for line in description.split(separator: "\n", omittingEmptySubsequences: false) {
+        var heading = line.trimmingCharacters(in: .whitespaces)
+        if heading.hasPrefix("#") {
+            hasMarkdownHeading = true
+        }
+        while heading.hasPrefix("#") {
+            heading = heading.dropFirst().trimmingCharacters(in: .whitespaces)
+        }
+        if forbidden.contains(where: {
+            heading.compare($0, options: .caseInsensitive) == .orderedSame
+        }) {
+            warnings.append("description contains a forbidden heading")
+            break
+        }
+    }
+    if hasMarkdownHeading || leavesMarkdownVocabulary(description) {
+        warnings.append("description leaves the Markdown vocabulary")
+    }
+    if description.utf8.count > 1_048_576 {
+        warnings.append("description exceeds the field cap")
+    }
+    return warnings
+}
+
+private func leavesMarkdownVocabulary(_ description: String) -> Bool {
+    let rules = description.split(separator: "\n", omittingEmptySubsequences: false)
+        .filter { $0.trimmingCharacters(in: .whitespaces) == "---" }
+        .count
+    return rules > 1 || description.contains("```") || description.contains("![")
+}
+
+private func hasBrokenStatement(_ description: String) -> Bool {
+    for line in description.split(separator: "\n", omittingEmptySubsequences: false) {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { continue }
+        if trimmed == "---" { continue }
+        if trimmed.hasPrefix("#") { continue }
+        if trimmed.range(of: "Definition of Done", options: .caseInsensitive) != nil {
+            continue
+        }
+        if isLabeledLine(trimmed, "Expected") { continue }
+        if isLabeledLine(trimmed, "Actual") { continue }
+        if isLabeledLine(trimmed, "Environment") { continue }
+        if trimmed.first?.isNumber == true { return false }
+        return true
+    }
+    return false
+}
+
+private func hasNumberedSteps(_ description: String) -> Bool {
+    description.split(separator: "\n", omittingEmptySubsequences: false).contains { line in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let first = trimmed.first, first.isNumber else { return false }
+        return trimmed.contains(". ") || trimmed.contains(") ")
+    }
+}
+
+private func hasLabeledLine(_ description: String, _ label: String) -> Bool {
+    description.split(separator: "\n", omittingEmptySubsequences: false).contains {
+        isLabeledLine($0.trimmingCharacters(in: .whitespaces), label)
+    }
+}
+
+private func isLabeledLine(_ line: String, _ label: String) -> Bool {
+    var text = line
+    while text.hasPrefix("**") {
+        text = String(text.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+    }
+    return text.lowercased().hasPrefix(label.lowercased())
+}
 
 private func wikiMarkup(from markdown: String) -> String {
     markdown.split(separator: "\n", omittingEmptySubsequences: false).map { line in
@@ -878,10 +1003,22 @@ private let draftJSONInstruction = """
     Reply with JSON only, no tools: ticketType (story, bug, or chore), title, shortLabel, description, openQuestions.
     """
 
+private let generateInstruction = """
+    \(draftJSONInstruction)
+    Infer ticketType from the brain-dump. Default story if ambiguous. Do not ask ticket type as a question.
+    """
+
 private let sendInstruction = """
     \(draftJSONInstruction)
     Revise the Draft from the chat answer.
     """
+
+private func reshapeInstruction(_ ticketType: TicketType) -> String {
+    """
+    \(draftJSONInstruction)
+    Reshape the Draft as a \(ticketType.rawValue). Keep Material and answers already given. Do not infer a different ticket type.
+    """
+}
 
 private let definitionOfDoneInstruction = """
     Reply with a JSON array of Definition of Done bullets. Read only the description. Do not add Scope. No tools.

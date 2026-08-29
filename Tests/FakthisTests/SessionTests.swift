@@ -243,6 +243,251 @@ import Fakthis
     #expect(ticket.completenessMarker == CompletenessMarker.clear)
 }
 
+@Test func generateInfersBugFromTheBrainDumpAndSubmitsTheMappedJiraIssueType() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .bug,
+            title: BugReply.title,
+            shortLabel: BugReply.shortLabel,
+            description: BugReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(BugReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.ticketType == .bug)
+    #expect(draft.title == BugReply.title)
+    #expect(draft.shortLabel == BugReply.shortLabel)
+    #expect(draft.description.contains("The pick screen does not show an error"))
+    #expect(draft.description.contains("1. Open a pick"))
+    #expect(draft.description.contains("Expected"))
+    #expect(draft.description.contains("Actual"))
+    #expect(draft.description.contains("Environment"))
+    #expect(draft.description.contains("---"))
+    #expect(draft.description.contains("Definition of Done"))
+    #expect(draft.openQuestions.isEmpty)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    let ticket = try #require(await harness.jira.created.first)
+    #expect(ticket.jiraIssueType == "Bug")
+    #expect(ticket.title == BugReply.title)
+    #expect(ticket.completenessMarker == CompletenessMarker.clear)
+}
+
+@Test func generateInfersChoreFromTheBrainDumpAndSubmitsTheMappedJiraIssueType() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: ChoreReply.shortLabel,
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(ChoreReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.ticketType == .chore)
+    #expect(draft.title == ChoreReply.title)
+    #expect(draft.shortLabel == ChoreReply.shortLabel)
+    #expect(draft.description.contains("Bump the scanner SDK"))
+    #expect(draft.description.contains("---"))
+    #expect(draft.description.contains("Definition of Done"))
+    #expect(draft.openQuestions.isEmpty)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    let ticket = try #require(await harness.jira.created.first)
+    #expect(ticket.jiraIssueType == "Chore")
+    #expect(ticket.title == ChoreReply.title)
+}
+
+@Test func generateDefaultsToStoryWhenTheInferredTypeIsAmbiguous() async throws {
+    let harness = Harness()
+    await harness.model.replaceRawReply("""
+        {"ticketType":"task","title":"\(StoryReply.title)","shortLabel":"\(StoryReply.shortLabel)","description":"\(StoryReply.firstPassDescription)","openQuestions":[]}
+        """)
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.ticketType == .story)
+    #expect(draft.title == StoryReply.title)
+}
+
+@Test func changingTicketTypeMidChatReshapesTheDraftAndKeepsMaterialAndAnswers() async throws {
+    let harness = Harness()
+    let email = "From: client@acme.com\nThe pick screen shows nothing when the bin scan fails."
+    let screenshot = Material(
+        filename: "scan-fail.png",
+        mimeType: "image/png",
+        data: Data("png-bytes".utf8)
+    )
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "client-email.txt",
+                mimeType: "text/plain",
+                data: Data(email.utf8)
+            )
+        )
+    )
+    _ = try await harness.session.perform(.attachMaterial(screenshot))
+    let generated = try await harness.generateStory(
+        openQuestions: ["What should happen when the bin scan fails?"]
+    )
+    let draftId = try #require(generated.draft?.id)
+
+    let answer = "show a blocking error and do not take items"
+    _ = try await harness.session.perform(.typeBrainDump(answer))
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: "bin scan failure",
+            description: "When a **bin** scan fails, the **pick screen** shows a blocking error.",
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.send)
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: BugReply.title,
+            shortLabel: BugReply.shortLabel,
+            description: BugReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    let reshaped = try await harness.session.perform(.changeTicketType(.bug))
+    let draft = try #require(reshaped.draft)
+    #expect(draft.id == draftId)
+    #expect(draft.ticketType == .bug)
+    #expect(draft.title == BugReply.title)
+    #expect(draft.description.contains("1. Open a pick"))
+    #expect(draft.description.contains("Expected"))
+    #expect(draft.description.contains("Actual"))
+    #expect(draft.description.contains("Environment"))
+
+    let requests = await harness.model.completeRequests
+    let reshapeRequest = requests[requests.count - 2]
+    #expect(reshapeRequest.user.contains(answer) || reshapeRequest.user.contains("blocking error"))
+    #expect(reshapeRequest.user.contains("client-email.txt"))
+    #expect(reshapeRequest.user.contains(email))
+    #expect(reshapeRequest.screenshots == [screenshot])
+
+    let folder = harness.draftFolder(id: draftId).appending(component: "material")
+    #expect(
+        FileManager.default.fileExists(
+            atPath: folder.appending(component: "client-email.txt").path
+        )
+    )
+    #expect(
+        FileManager.default.fileExists(
+            atPath: folder.appending(component: "scan-fail.png").path
+        )
+    )
+}
+
+@Test func structuralCheckWarnsOnBugShapeWithoutBlockingSubmitOrApplyingTheCompletenessLabel()
+    async throws
+{
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .bug,
+            title: "As a picker I want a scan error so that I stop",
+            shortLabel: "scan error",
+            description: "Something broke.",
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(BugReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.structuralWarnings.contains("title does not match the Bug convention"))
+    #expect(generated.structuralWarnings.contains("Bug is missing steps to reproduce"))
+    #expect(generated.structuralWarnings.contains("Bug is missing Expected against Actual"))
+    #expect(generated.structuralWarnings.contains("Bug is missing Environment"))
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(submitted.structuralWarnings.isEmpty == false)
+    let ticket = try #require(await harness.jira.created.first)
+    #expect(ticket.completenessMarker == CompletenessMarker.clear)
+}
+
+@Test func structuralCheckWarnsWhenOutputLeavesTheMarkdownVocabulary() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: StoryReply.shortLabel,
+            description: """
+                \(StoryReply.firstPassDescription)
+
+                # Overview
+                """,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.structuralWarnings.contains("description leaves the Markdown vocabulary"))
+}
+
+@Test func aWellFormedBugHasNoStructuralWarnings() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .bug,
+            title: BugReply.title,
+            shortLabel: BugReply.shortLabel,
+            description: BugReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(BugReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.structuralWarnings.isEmpty)
+}
+
+@Test func structuralCheckWarnsWhenAChoreTitleUsesTheStoryConvention() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: "As a picker I want the SDK upgraded so that labels scan",
+            shortLabel: ChoreReply.shortLabel,
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(ChoreReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.structuralWarnings.contains("title does not match the Chore convention"))
+}
+
+@Test func aWellFormedChoreHasNoStructuralWarnings() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: ChoreReply.shortLabel,
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(ChoreReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.structuralWarnings.isEmpty)
+}
+
 @Test func submitDoesNotQueryAttachmentPolicyWhenTheDraftHasNoMedia() async throws {
     let harness = Harness()
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
@@ -1287,6 +1532,34 @@ private struct DiskSidecar: Decodable {
     var key: String?
 }
 
+private enum BugReply {
+    static let title = "Pick screen does not show a bin scan error"
+    static let shortLabel = "bin scan error missing"
+    static let firstPassDescription = """
+        The pick screen does not show an error when a bin scan fails.
+
+        1. Open a pick
+        2. Scan a bin that fails
+        3. Watch the pick screen
+
+        **Expected:** a blocking error
+        **Actual:** the pick continues
+        **Environment:** warehouse iPad
+        """
+    static let definitionOfDone = "Pick screen shows a blocking error when a bin scan fails"
+    static let brainDump =
+        "the pick screen doesn't show anything when the bin scan fails, they just keep picking"
+}
+
+private enum ChoreReply {
+    static let title = "Upgrade the pick-screen scanner SDK"
+    static let shortLabel = "upgrade scanner SDK"
+    static let firstPassDescription =
+        "Bump the scanner SDK so pickers can scan the new bin labels."
+    static let brainDump =
+        "upgrade the scanner SDK on the pick screen so it can read the new bin labels"
+}
+
 private enum StoryReply {
     static let title =
         "As a warehouse picker I want to scan a bin so that I pick from the right location"
@@ -1319,7 +1592,11 @@ private struct Harness {
     }
 
     init(
-        ticketTypeMapping: [TicketType: String] = [.story: "Story"],
+        ticketTypeMapping: [TicketType: String] = [
+            .story: "Story",
+            .bug: "Bug",
+            .chore: "Chore",
+        ],
         terms: [String] = [],
         seedProject: Bool = true,
         compileFinished: Bool = true

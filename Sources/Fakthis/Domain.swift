@@ -176,6 +176,15 @@ public struct GenerateReply: Equatable, Sendable, Codable {
         self.description = description
         self.openQuestions = openQuestions
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ticketType = (try? container.decode(TicketType.self, forKey: .ticketType)) ?? .story
+        title = try container.decode(String.self, forKey: .title)
+        shortLabel = try container.decode(String.self, forKey: .shortLabel)
+        description = try container.decode(String.self, forKey: .description)
+        openQuestions = try container.decode([String].self, forKey: .openQuestions)
+    }
 }
 
 extension Catalog {
