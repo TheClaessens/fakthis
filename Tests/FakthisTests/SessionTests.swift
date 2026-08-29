@@ -1201,6 +1201,27 @@ import Fakthis
     #expect(await harness.jira.uploaded.isEmpty)
 }
 
+@Test func attachedMaterialIsOnStateBeforeGenerateAndSurvivesAReopen() async throws {
+    let harness = Harness()
+    for item in [
+        Material(filename: "client-email.txt", mimeType: "text/plain", data: Data("email".utf8)),
+        Material(filename: "pick.png", mimeType: "image/png", data: Data("png-bytes".utf8)),
+        Material(filename: "repro.mov", mimeType: "video/quicktime", data: Data("mov".utf8)),
+    ] {
+        _ = try await harness.session.perform(.attachMaterial(item))
+    }
+
+    let attached = try await harness.session.state()
+    #expect(attached.draft == nil)
+    #expect(attached.material.map(\.filename) == ["client-email.txt", "pick.png", "repro.mov"])
+    #expect(attached.material.map(\.isText) == [true, false, false])
+    #expect(attached.material.map(\.isScreenshot) == [false, true, false])
+    #expect(attached.material.map(\.isVideo) == [false, false, true])
+
+    let reopened = try await harness.reopen().state()
+    #expect(reopened.material.map(\.filename) == ["client-email.txt", "pick.png", "repro.mov"])
+}
+
 @Test func failedMediaUploadLeavesTheQueueAndRetryDeletesTheFolder() async throws {
     let harness = Harness()
     let png = Data("png-bytes".utf8)

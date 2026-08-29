@@ -122,6 +122,29 @@ public struct Material: Equatable, Sendable {
         self.data = data
     }
 
+    /// What is attached, without the bytes. A snapshot that carried an 84 MB recording would
+    /// be copied every time the window read state.
+    public var attached: AttachedMaterial {
+        AttachedMaterial(filename: filename, mimeType: mimeType)
+    }
+
+    public var isText: Bool { attached.isText }
+    public var isScreenshot: Bool { attached.isScreenshot }
+    public var isVideo: Bool { attached.isVideo }
+    public var isMedia: Bool { attached.isMedia }
+}
+
+/// Material as a reader sees it: the name and the kind, which is everything a chip on the
+/// composer needs and everything routing is decided on. The bytes stay behind `Session`.
+public struct AttachedMaterial: Equatable, Sendable {
+    public var filename: String
+    public var mimeType: String
+
+    public init(filename: String, mimeType: String) {
+        self.filename = filename
+        self.mimeType = mimeType
+    }
+
     public var isText: Bool { mimeType.hasPrefix("text/") }
     public var isScreenshot: Bool { mimeType.hasPrefix("image/") }
     public var isVideo: Bool { mimeType.hasPrefix("video/") }
@@ -195,6 +218,24 @@ public struct Draft: Equatable, Sendable {
         self.openQuestions = openQuestions
         self.key = key
     }
+
+    /// The description with the open-questions section at its foot, above the horizontal rule
+    /// so the Definition of Done stays the closer. What the window renders and what Submit
+    /// writes are the same string, so the screen and Jira cannot disagree about where it sits.
+    public var descriptionWithOpenQuestions: String {
+        guard !openQuestions.isEmpty else { return description }
+        let bullets = openQuestions.map { "- \($0)" }.joined(separator: "\n")
+        let section = "\(Draft.openQuestionsPreamble)\n\(bullets)"
+        guard let horizontalRule = description.range(of: "\n---") else {
+            return description + "\n\n" + section
+        }
+        return description.replacingCharacters(
+            in: horizontalRule,
+            with: "\n\n\(section)\n\n---"
+        )
+    }
+
+    public static let openQuestionsPreamble = "The reporter skipped these questions:"
 }
 
 public struct GenerateReply: Equatable, Sendable, Codable {

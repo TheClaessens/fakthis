@@ -32,6 +32,7 @@ public actor Session {
     public struct State: Equatable, Sendable {
         public var field: String
         public var draft: Draft?
+        public var material: [AttachedMaterial]
         public var catalog: Catalog
         public var aneCompileInProgress: Bool
         public var settings: Settings?
@@ -221,7 +222,7 @@ public actor Session {
             key = try await jira.createTicket(
                 projectKey: project.key,
                 title: draft.title,
-                descriptionWiki: wikiMarkup(from: descriptionForSubmit(draft)),
+                descriptionWiki: wikiMarkup(from: draft.descriptionWithOpenQuestions),
                 jiraIssueType: jiraIssueType,
                 parentKey: nil,
                 completenessMarker: draft.openQuestions.isEmpty ? .clear : .apply
@@ -987,23 +988,11 @@ public actor Session {
         var text: String
     }
 
-    private func descriptionForSubmit(_ draft: Draft) -> String {
-        guard !draft.openQuestions.isEmpty else { return draft.description }
-        let bullets = draft.openQuestions.map { "- \($0)" }.joined(separator: "\n")
-        let section = "\(completenessPreamble)\n\(bullets)"
-        guard let horizontalRule = draft.description.range(of: "\n---") else {
-            return draft.description + "\n\n" + section
-        }
-        return draft.description.replacingCharacters(
-            in: horizontalRule,
-            with: "\n\n\(section)\n\n---"
-        )
-    }
-
     private func snapshot() -> State {
         State(
             field: field,
             draft: draft,
+            material: material.map(\.attached),
             catalog: catalog,
             aneCompileInProgress: aneCompileInProgress,
             settings: settings,
@@ -1019,8 +1008,6 @@ public actor Session {
         )
     }
 }
-
-private let completenessPreamble = "The reporter skipped these questions:"
 
 private func structuralWarnings(for draft: Draft) -> [String] {
     titleConventionWarnings(draft) + typeShapeWarnings(draft) + descriptionWarnings(draft.description)
