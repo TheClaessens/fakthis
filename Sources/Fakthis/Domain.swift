@@ -128,6 +128,47 @@ public struct Material: Equatable, Sendable {
     public var isMedia: Bool { isScreenshot || isVideo }
 }
 
+public enum DuplicateHit: Equatable, Sendable {
+    case catalog(key: TicketKey, shortLabel: String?, title: String)
+    case localDraft(id: String, shortLabel: String, title: String)
+
+    public var key: TicketKey? {
+        if case .catalog(let key, _, _) = self { return key }
+        return nil
+    }
+
+    public var draftId: String? {
+        if case .localDraft(let id, _, _) = self { return id }
+        return nil
+    }
+
+    public var shortLabel: String? {
+        switch self {
+        case .catalog(_, let shortLabel, _): shortLabel
+        case .localDraft(_, let shortLabel, _): shortLabel
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .catalog(_, _, let title): title
+        case .localDraft(_, _, let title): title
+        }
+    }
+}
+
+public struct RelatedHit: Equatable, Sendable {
+    public var key: TicketKey
+    public var title: String
+    public var ticked: Bool
+
+    public init(key: TicketKey, title: String, ticked: Bool = false) {
+        self.key = key
+        self.title = title
+        self.ticked = ticked
+    }
+}
+
 public struct Draft: Equatable, Sendable {
     public var id: String
     public var ticketType: TicketType

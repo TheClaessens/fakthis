@@ -15,6 +15,9 @@ public actor Session {
         case saveCredentials(Settings, jiraToken: String, modelKey: String)
         case enterProjectKey(String)
         case confirmProject(mapping: [TicketType: String])
+        case dismissDuplicate
+        case workOnDuplicate
+        case tickRelated(TicketKey)
     }
 
     public struct State: Equatable, Sendable {
@@ -29,6 +32,8 @@ public actor Session {
         public var materialWarnings: [String]
         public var failedUploads: [String]
         public var structuralWarnings: [String]
+        public var duplicateInterrupt: DuplicateHit?
+        public var related: [RelatedHit]
     }
 
     private var project: Project?
@@ -50,6 +55,8 @@ public actor Session {
     private var textMaterialWarning: String?
     private var materialWarnings: [String] = []
     private var failedUploads: [String] = []
+    private var duplicateInterrupt: DuplicateHit?
+    private var related: [RelatedHit] = []
 
     public init(
         applicationSupport: URL,
@@ -109,6 +116,12 @@ public actor Session {
             try await enterProjectKey(key)
         case .confirmProject(let mapping):
             try await confirmProject(mapping: mapping)
+        case .dismissDuplicate:
+            duplicateInterrupt = nil
+        case .workOnDuplicate:
+            try workOnDuplicate()
+        case .tickRelated(let key):
+            tickRelated(key)
         }
         return snapshot()
     }
@@ -185,6 +198,7 @@ public actor Session {
         else {
             return
         }
+        try refreshMatches()
         let key: TicketKey
         do {
             key = try await jira.createTicket(
@@ -386,7 +400,7 @@ public actor Session {
     }
 
     private func generateUserMessage() -> String {
-        let blocks = textMaterialBlocks()
+        let blocks = textMaterialBlocks() + relatedContextBlocks()
         guard !blocks.isEmpty else { return field }
         return ([field] + blocks).joined(separator: "\n\n")
     }
@@ -411,16 +425,20 @@ public actor Session {
     }
 
     private func draftAndAnswerMessage(_ draft: Draft) -> String {
-        """
-        Chat answer:
-        \(field)
+        let base = """
+            Chat answer:
+            \(field)
 
-        \(currentDraftBlock(draft))
-        """
+            \(currentDraftBlock(draft))
+            """
+        let context = relatedContextBlocks()
+        guard !context.isEmpty else { return base }
+        return ([base] + context).joined(separator: "\n\n")
     }
 
     private func reshapeUserMessage(_ draft: Draft) -> String {
-        ([currentDraftBlock(draft), field] + textMaterialBlocks()).joined(separator: "\n\n")
+        ([currentDraftBlock(draft), field] + textMaterialBlocks() + relatedContextBlocks())
+            .joined(separator: "\n\n")
     }
 
     private func currentDraftBlock(_ draft: Draft) -> String {
@@ -439,6 +457,31 @@ public actor Session {
             let body = String(data: item.data, encoding: .utf8) ?? ""
             return "\(item.filename)\n\(body)"
         }
+    }
+
+    private func relatedContextBlocks() -> [String] {
+        let keys = related.filter(\.ticked).map(\.key.value)
+        guard !keys.isEmpty else { return [] }
+        return ["Related: \(keys.joined(separator: ", "))"]
+    }
+
+    private func tickRelated(_ key: TicketKey) {
+        guard let index = related.firstIndex(where: { $0.key == key }) else { return }
+        related[index].ticked.toggle()
+    }
+
+    private func workOnDuplicate() throws {
+        guard case .localDraft(let id, _, _)? = duplicateInterrupt else { return }
+        guard let folder = draftsRoot()?.appending(component: id),
+            let stored = try storedDraft(in: folder)
+        else { return }
+        draft = stored.draft
+        draftId = stored.draft.id
+        failedUploads = stored.failedUploads
+        blockedUploads = []
+        material = try loadMaterial()
+        try refreshMatches()
+        duplicateInterrupt = nil
     }
 
     private func reviseDraft(
@@ -495,6 +538,91 @@ public actor Session {
         try persistDraft()
         try persistMaterial()
         try persistTranscript()
+        try refreshMatches()
+    }
+
+    private func refreshMatches() throws {
+        let ticked = Set(related.filter(\.ticked).map(\.key))
+        duplicateInterrupt = nil
+        related = []
+        guard let draft else { return }
+
+        var bestDuplicate: (score: Double, hit: DuplicateHit)?
+        var relatedCandidates: [(score: Double, hit: RelatedHit)] = []
+
+        func considerDuplicate(score: Double, hit: DuplicateHit) {
+            if let current = bestDuplicate, score <= current.score { return }
+            bestDuplicate = (score, hit)
+        }
+
+        for row in catalog.rows {
+            if row.key == draft.key { continue }
+            let compared = row.shortLabel ?? row.title
+            let against = row.shortLabel != nil ? draft.shortLabel : draft.title
+            let tokens = matchTokens(against)
+            let other = matchTokens(compared)
+            let intersection = tokens.intersection(other).count
+            guard intersection >= 1 else { continue }
+            let score = overlapCoefficient(intersection, min(tokens.count, other.count))
+
+            relatedCandidates.append(
+                (
+                    score,
+                    RelatedHit(key: row.key, title: row.title, ticked: ticked.contains(row.key))
+                )
+            )
+            let done = row.status.compare("Done", options: .caseInsensitive) == .orderedSame
+            if !done,
+                typeAllowsDuplicate(row, draft: draft),
+                isDuplicateScore(score, intersection: intersection, against: against, compared: compared)
+            {
+                considerDuplicate(
+                    score: score,
+                    hit: .catalog(key: row.key, shortLabel: row.shortLabel, title: row.title)
+                )
+            }
+        }
+
+        for local in try localCreateDrafts() where local.id != draft.id {
+            let tokens = matchTokens(draft.shortLabel)
+            let other = matchTokens(local.shortLabel)
+            let intersection = tokens.intersection(other).count
+            let score = overlapCoefficient(intersection, min(tokens.count, other.count))
+            guard local.ticketType == draft.ticketType,
+                isDuplicateScore(
+                    score,
+                    intersection: intersection,
+                    against: draft.shortLabel,
+                    compared: local.shortLabel
+                )
+            else { continue }
+            considerDuplicate(
+                score: score,
+                hit: .localDraft(id: local.id, shortLabel: local.shortLabel, title: local.title)
+            )
+        }
+
+        duplicateInterrupt = bestDuplicate?.hit
+        related = relatedCandidates
+            .filter { $0.hit.key != bestDuplicate?.hit.key }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                return lhs.hit.key.value < rhs.hit.key.value
+            }
+            .prefix(3)
+            .map(\.hit)
+    }
+
+    private func typeAllowsDuplicate(_ row: CatalogRow, draft: Draft) -> Bool {
+        if let ticketType = row.ticketType {
+            return ticketType == draft.ticketType
+        }
+        guard let mapping = project?.ticketTypeMapping else { return true }
+        let unique = Set(mapping.values)
+        if unique.count < mapping.count { return true }
+        guard let inferred = mapping.first(where: { $0.value == row.jiraIssueType })?.key
+        else { return true }
+        return inferred == draft.ticketType
     }
 
     private func loadDraftIfMissing() throws {
@@ -572,28 +700,8 @@ public actor Session {
 
         var queue: StoredDraft?
         for folder in folders {
-            guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            else { continue }
-            let sidecarURL = folder.appending(component: "draft.json")
-            guard FileManager.default.fileExists(atPath: sidecarURL.path) else { continue }
-            let sidecar = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarURL))
-            let description = try String(
-                contentsOf: folder.appending(component: "description.md"),
-                encoding: .utf8
-            )
-            let stored = StoredDraft(
-                draft: Draft(
-                    id: folder.lastPathComponent,
-                    ticketType: sidecar.ticketType,
-                    title: sidecar.title,
-                    shortLabel: sidecar.shortLabel,
-                    description: description,
-                    openQuestions: sidecar.openQuestions,
-                    key: sidecar.key.map(TicketKey.init)
-                ),
-                failedUploads: sidecar.failedUploads
-            )
-            if sidecar.key == nil {
+            guard let stored = try storedDraft(in: folder) else { continue }
+            if stored.draft.key == nil {
                 return stored
             }
             if queue == nil {
@@ -601,6 +709,47 @@ public actor Session {
             }
         }
         return queue
+    }
+
+    private func localCreateDrafts() throws -> [Draft] {
+        guard let root = draftsRoot(),
+            FileManager.default.fileExists(atPath: root.path)
+        else { return [] }
+        let folders = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        return try folders.compactMap { folder in
+            guard let stored = try storedDraft(in: folder), stored.draft.key == nil else {
+                return nil
+            }
+            return stored.draft
+        }
+    }
+
+    private func storedDraft(in folder: URL) throws -> StoredDraft? {
+        guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        else { return nil }
+        let sidecarURL = folder.appending(component: "draft.json")
+        guard FileManager.default.fileExists(atPath: sidecarURL.path) else { return nil }
+        let sidecar = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarURL))
+        let description = try String(
+            contentsOf: folder.appending(component: "description.md"),
+            encoding: .utf8
+        )
+        return StoredDraft(
+            draft: Draft(
+                id: folder.lastPathComponent,
+                ticketType: sidecar.ticketType,
+                title: sidecar.title,
+                shortLabel: sidecar.shortLabel,
+                description: description,
+                openQuestions: sidecar.openQuestions,
+                key: sidecar.key.map(TicketKey.init)
+            ),
+            failedUploads: sidecar.failedUploads
+        )
     }
 
     private func loadPendingMaterial() throws {
@@ -819,7 +968,9 @@ public actor Session {
             textMaterialWarning: textMaterialWarning,
             materialWarnings: materialWarnings,
             failedUploads: failedUploads,
-            structuralWarnings: draft.map(structuralWarnings(for:)) ?? []
+            structuralWarnings: draft.map(structuralWarnings(for:)) ?? [],
+            duplicateInterrupt: duplicateInterrupt,
+            related: related
         )
     }
 }
@@ -1070,4 +1221,33 @@ private func iso8601(_ date: Date) -> String {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
     return formatter.string(from: date)
+}
+
+private let matchStopWords: Set<String> = [
+    "a", "an", "as", "i", "want", "so", "that", "to", "the", "of", "for", "and", "or",
+    "in", "on", "with", "from",
+]
+
+private func matchTokens(_ text: String) -> Set<String> {
+    Set(
+        text.lowercased()
+            .split { !$0.isLetter }
+            .map(String.init)
+            .filter { !$0.isEmpty && !matchStopWords.contains($0) }
+    )
+}
+
+private func overlapCoefficient(_ intersection: Int, _ smaller: Int) -> Double {
+    guard smaller > 0 else { return 0 }
+    return Double(intersection) / Double(smaller)
+}
+
+private func isDuplicateScore(
+    _ score: Double,
+    intersection: Int,
+    against: String,
+    compared: String
+) -> Bool {
+    if against.compare(compared, options: .caseInsensitive) == .orderedSame { return true }
+    return score >= 0.75 && intersection >= 2
 }

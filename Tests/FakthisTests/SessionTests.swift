@@ -221,6 +221,320 @@ import Fakthis
     #expect(ticket.descriptionWiki.contains("----"))
 }
 
+@Test func relatedListCapsAtThreeDefaultsOffAndTickingIsContextForTheNextTurn() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress")
+        ],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                status: "Done",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            ),
+            CatalogRow(
+                key: TicketKey("FAK-300"),
+                title: "Scan tote before pick on the warehouse floor",
+                jiraIssueType: "Story"
+            ),
+            CatalogRow(
+                key: TicketKey("FAK-301"),
+                title: "Picker labels on the pick screen",
+                jiraIssueType: "Story"
+            ),
+            CatalogRow(
+                key: TicketKey("FAK-302"),
+                title: "Location audit for warehouse bins",
+                jiraIssueType: "Story"
+            ),
+            CatalogRow(
+                key: TicketKey("FAK-303"),
+                title: "Dock assignment on the right side",
+                jiraIssueType: "Story"
+            ),
+            CatalogRow(
+                key: TicketKey("FAK-400"),
+                title: "Rewrite the invoice PDF renderer",
+                jiraIssueType: "Story",
+                labels: ["picking"],
+                parentEpicKey: TicketKey("FAK-100")
+            ),
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.duplicateInterrupt == nil)
+    #expect(generated.related.count == 3)
+    #expect(generated.related.allSatisfy { !$0.ticked })
+    #expect(generated.related.map(\.key).contains(TicketKey("FAK-231")))
+    #expect(!generated.related.map(\.key).contains(TicketKey("FAK-400")))
+
+    let ticked = try await harness.session.perform(.tickRelated(TicketKey("FAK-231")))
+    #expect(ticked.related.first { $0.key == TicketKey("FAK-231") }?.ticked == true)
+    #expect(ticked.draft?.description.contains("FAK-231") == false)
+
+    let regenerated = try await harness.session.perform(.generate)
+    #expect(regenerated.related.first { $0.key == TicketKey("FAK-231") }?.ticked == true)
+    #expect(regenerated.draft?.description.contains("FAK-231") == false)
+    let generateRequest = try #require(await harness.model.completeRequests.last { request in
+        request.user.contains(StoryReply.brainDump)
+    })
+    #expect(generateRequest.user.contains("FAK-231"))
+    #expect(generateRequest.user.contains("Related:"))
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.created.count == 1)
+    #expect(await harness.jira.blocksLinks.isEmpty)
+}
+
+@Test func doneIsNeverADuplicateInterrupt() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                status: "Done",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.duplicateInterrupt == nil)
+}
+
+@Test func duplicateSkipsTypeFilterOnManyToOneJiraPulledRowsAndAppliesItWhenMappingIsOneToOne()
+    async throws
+{
+    let oneToOne = Harness()
+    try oneToOne.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Bug"
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await oneToOne.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let filtered = try await oneToOne.session.perform(.generate)
+    #expect(filtered.duplicateInterrupt == nil)
+
+    let manyToOne = Harness(ticketTypeMapping: [
+        .story: "Task",
+        .bug: "Task",
+        .chore: "Task",
+    ])
+    try manyToOne.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Task"
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await manyToOne.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let unfiltered = try await manyToOne.session.perform(.generate)
+    #expect(unfiltered.duplicateInterrupt?.key == TicketKey("FAK-231"))
+}
+
+@Test func duplicateRequiresTheSameTicketTypeWhenTheCatalogRowKnowsIt() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Bug",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .bug
+            )
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.draft?.ticketType == .story)
+    #expect(generated.duplicateInterrupt == nil)
+}
+
+@Test func changingTypeOrShortLabelRerunsDuplicateMatching() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: BugReply.title,
+                jiraIssueType: "Bug",
+                shortLabel: BugReply.shortLabel,
+                ticketType: .bug
+            )
+        ],
+        componentNames: []
+    )
+
+    let generated = try await harness.generateStory()
+    #expect(generated.draft?.ticketType == .story)
+    #expect(generated.duplicateInterrupt == nil)
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .bug,
+            title: BugReply.title,
+            shortLabel: BugReply.shortLabel,
+            description: BugReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    let reshaped = try await harness.session.perform(.changeTicketType(.bug))
+    #expect(reshaped.draft?.ticketType == .bug)
+    #expect(reshaped.duplicateInterrupt?.key == TicketKey("FAK-231"))
+}
+
+@Test func submitRerunsDuplicateMatchingAndStillCreatesTheTicket() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.duplicateInterrupt?.key == TicketKey("FAK-231"))
+
+    _ = try await harness.session.perform(.dismissDuplicate)
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(submitted.duplicateInterrupt?.key == TicketKey("FAK-231"))
+    #expect(await harness.jira.created.count == 1)
+}
+
+@Test func localDraftDuplicateIsNamedByShortLabelAndWorkOnThatFocusesIt() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let currentId = try #require(generated.draft?.id)
+    #expect(generated.duplicateInterrupt == nil)
+
+    let otherId = "other-draft"
+    try harness.writeDraft(
+        id: otherId,
+        ticketType: .story,
+        title: "As a picker I want to scan a bin so that I pick from the right location",
+        shortLabel: StoryReply.shortLabel,
+        description: "A sibling Draft about scanning a bin."
+    )
+
+    let rematched = try await harness.session.perform(.generate)
+    let hit = try #require(rematched.duplicateInterrupt)
+    #expect(hit.key == nil)
+    #expect(hit.draftId == otherId)
+    #expect(hit.shortLabel == StoryReply.shortLabel)
+    #expect(rematched.draft?.id == currentId)
+
+    let focused = try await harness.session.perform(.workOnDuplicate)
+    #expect(focused.duplicateInterrupt == nil)
+    #expect(focused.draft?.id == otherId)
+    #expect(focused.draft?.description == "A sibling Draft about scanning a bin.")
+    #expect(focused.draft?.shortLabel == StoryReply.shortLabel)
+}
+
+@Test func afterGenerateAJiraPulledRowMatchesOnTitleTokensWhenItHasNoShortLabel() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story"
+            )
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let hit = try #require(generated.duplicateInterrupt)
+    #expect(hit.key == TicketKey("FAK-231"))
+    #expect(hit.shortLabel == nil)
+    #expect(hit.title == StoryReply.title)
+}
+
+@Test func afterGenerateAMatchingCatalogShortLabelIsADismissibleDuplicateAndDoesNotBlockSubmit()
+    async throws
+{
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let hit = try #require(generated.duplicateInterrupt)
+    #expect(hit.key == TicketKey("FAK-231"))
+    #expect(hit.shortLabel == StoryReply.shortLabel)
+    #expect(generated.related.isEmpty)
+
+    let continued = try await harness.session.perform(.dismissDuplicate)
+    #expect(continued.duplicateInterrupt == nil)
+    #expect(continued.draft?.title == StoryReply.title)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.created.count == 1)
+    #expect(await harness.jira.blocksLinks.isEmpty)
+}
+
 @Test func structuralWarningsDoNotBlockSubmitOrApplyTheCompletenessLabel() async throws {
     let harness = Harness()
     await harness.model.replaceReply(
@@ -1236,6 +1550,8 @@ import Fakthis
     #expect(draft.description.contains("---"))
     #expect(draft.description.contains(StoryReply.definitionOfDone))
     #expect(state.catalog.rows.isEmpty)
+    #expect(state.duplicateInterrupt == nil)
+    #expect(state.related.isEmpty)
 
     let requests = await harness.model.completeRequests
     #expect(requests.count == 2)
@@ -1524,7 +1840,7 @@ private struct DiskCatalog: Codable {
     var catalog: Catalog
 }
 
-private struct DiskSidecar: Decodable {
+private struct DiskSidecar: Codable {
     var ticketType: TicketType
     var title: String
     var shortLabel: String
@@ -1698,6 +2014,32 @@ private struct Harness {
             catalog: Catalog(epics: epics, rows: rows, componentNames: componentNames)
         )
         try encoder.encode(file).write(to: folder.appending(component: "catalog.json"))
+    }
+
+    func writeDraft(
+        id: String,
+        ticketType: TicketType,
+        title: String,
+        shortLabel: String,
+        description: String
+    ) throws {
+        let folder = draftFolder(id: id)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let sidecar = DiskSidecar(
+            ticketType: ticketType,
+            title: title,
+            shortLabel: shortLabel,
+            openQuestions: [],
+            key: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(sidecar).write(to: folder.appending(component: "draft.json"))
+        try description.write(
+            to: folder.appending(component: "description.md"),
+            atomically: true,
+            encoding: .utf8
+        )
     }
 }
 

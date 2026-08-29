@@ -210,8 +210,11 @@ actor FakeJira: Jira {
         )
     }
 
+    private(set) var blocksLinks: [(blocker: TicketKey, blocked: TicketKey)] = []
+
     func createBlocksLink(blocker: TicketKey, blocked: TicketKey) async throws {
         if unreachable { throw JiraUnreachable() }
+        blocksLinks.append((blocker, blocked))
     }
 
     func pullCatalog(projectKey: String) async throws -> Catalog {
