@@ -87,6 +87,7 @@ struct CreatedTicket: Equatable, Sendable {
     var title: String
     var descriptionWiki: String
     var jiraIssueType: String
+    var completenessMarker: CompletenessMarker
 }
 
 struct SeededEpic: Sendable {
@@ -128,7 +129,8 @@ actor FakeJira: Jira {
         title: String,
         descriptionWiki: String,
         jiraIssueType: String,
-        parentKey: TicketKey?
+        parentKey: TicketKey?,
+        completenessMarker: CompletenessMarker
     ) async throws -> TicketKey
     {
         if unreachable { throw JiraUnreachable() }
@@ -136,7 +138,8 @@ actor FakeJira: Jira {
             CreatedTicket(
                 title: title,
                 descriptionWiki: descriptionWiki,
-                jiraIssueType: jiraIssueType
+                jiraIssueType: jiraIssueType,
+                completenessMarker: completenessMarker
             )
         )
         return nextKey

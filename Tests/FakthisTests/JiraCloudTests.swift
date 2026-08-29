@@ -39,7 +39,8 @@ import Fakthis
         title: "As a picker I want a bin scan so that picks are accurate",
         descriptionWiki: "On the *pick screen* a picker scans the *bin*.\n----\n* items are taken",
         jiraIssueType: "Story",
-        parentKey: nil
+        parentKey: nil,
+        completenessMarker: .clear
     )
 
     #expect(key == TicketKey("FAK-1"))
@@ -56,6 +57,7 @@ import Fakthis
     #expect((fields["project"] as? [String: Any])?["key"] as? String == "FAK")
     #expect((fields["issuetype"] as? [String: Any])?["name"] as? String == "Story")
     #expect(fields["parent"] == nil)
+    #expect(fields["labels"] == nil)
     let description = try #require(fields["description"] as? String)
     #expect(description.contains("*pick screen*"))
     #expect(description.contains("*bin*"))
@@ -73,11 +75,30 @@ import Fakthis
         title: "Scan tote before pick",
         descriptionWiki: "The tote scan is required.",
         jiraIssueType: "Story",
-        parentKey: TicketKey("FAK-100")
+        parentKey: TicketKey("FAK-100"),
+        completenessMarker: .clear
     )
 
     let fields = try issueFields(try #require(await http.requests.last))
     #expect((fields["parent"] as? [String: Any])?["key"] as? String == "FAK-100")
+}
+
+@Test func jiraCloudCreateAppliesCompletenessLabelWhenQuestionsRemain() async throws {
+    let http = ScriptedHTTP()
+    await http.queue(status: 201, json: #"{"key":"FAK-1"}"#)
+    let jira = jiraCloud(http)
+
+    _ = try await jira.createTicket(
+        projectKey: "FAK",
+        title: "As a picker I want a bin scan so that picks are accurate",
+        descriptionWiki: "The reporter skipped these questions:\n* What should happen when the bin scan fails?\n----\n* items are taken",
+        jiraIssueType: "Story",
+        parentKey: nil,
+        completenessMarker: .apply
+    )
+
+    let fields = try issueFields(try #require(await http.requests.last))
+    #expect(fields["labels"] as? [String] == ["fakthis-open-questions"])
 }
 
 @Test func jiraCloudUpdateWritesTitleDescriptionAndAddsCompletenessMarkerWithoutNotifyUsers()

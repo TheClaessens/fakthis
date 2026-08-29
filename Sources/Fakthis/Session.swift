@@ -6,6 +6,7 @@ public actor Session {
     public enum Intent: Sendable {
         case typeBrainDump(String)
         case generate
+        case send
         case submit
         case saveCredentials(Settings, jiraToken: String, modelKey: String)
         case enterProjectKey(String)
@@ -21,6 +22,7 @@ public actor Session {
         public var project: Project?
         public var proposedProject: ProposedProject?
         public var textMaterialWarning: String?
+        public var structuralWarnings: [String]
     }
 
     private var project: Project?
@@ -68,6 +70,9 @@ public actor Session {
             try await pullCatalogIfNeverPulled()
             startBackgroundRefreshIfStale()
             try await generate()
+        case .send:
+            startBackgroundRefreshIfStale()
+            try await send()
         case .submit:
             startBackgroundRefreshIfStale()
             try await submit()
@@ -162,9 +167,10 @@ public actor Session {
             key = try await jira.createTicket(
                 projectKey: project.key,
                 title: draft.title,
-                descriptionWiki: wikiMarkup(from: draft.description),
+                descriptionWiki: wikiMarkup(from: descriptionForSubmit(draft)),
                 jiraIssueType: jiraIssueType,
-                parentKey: nil
+                parentKey: nil,
+                completenessMarker: draft.openQuestions.isEmpty ? .clear : .apply
             )
         } catch is JiraUnreachable {
             return
@@ -255,6 +261,30 @@ public actor Session {
 
     private func generate() async throws {
         if draft?.key != nil { return }
+        guard project != nil else { return }
+        try await reviseDraft(user: field, instruction: draftJSONInstruction)
+    }
+
+    private func send() async throws {
+        guard let draft, draft.key == nil, project != nil else { return }
+        let questions = draft.openQuestions.joined(separator: "\n")
+        try await reviseDraft(
+            user: """
+                Chat answer:
+                \(field)
+
+                Current title: \(draft.title)
+                Current short label: \(draft.shortLabel)
+                Current description:
+                \(draft.description)
+                Open questions:
+                \(questions)
+                """,
+            instruction: sendInstruction
+        )
+    }
+
+    private func reviseDraft(user: String, instruction: String) async throws {
         guard let project else { return }
         let generated: GenerateReply
         let done: [String]
@@ -262,8 +292,8 @@ public actor Session {
             let prefix = stuffedPrefix(catalog: catalog, projectTerms: project.terms)
             generated = try decodeJSON(
                 try await model.complete(
-                    system: systemPrompt(prefix: prefix, instruction: generateInstruction),
-                    user: field
+                    system: systemPrompt(prefix: prefix, instruction: instruction),
+                    user: user
                 )
             )
             done = try decodeJSON(
@@ -417,12 +447,10 @@ public actor Session {
         encoder.outputFormatting = [.sortedKeys]
         let line = try encoder.encode(TranscriptLine(role: "user", text: field))
         guard let jsonl = String(data: line, encoding: .utf8) else { return }
-        try (jsonl + "\n").write(
-            to: root.appending(component: "drafts").appending(component: draft.id)
-                .appending(component: "transcript.jsonl"),
-            atomically: true,
-            encoding: .utf8
-        )
+        let url = root.appending(component: "drafts").appending(component: draft.id)
+            .appending(component: "transcript.jsonl")
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        try (existing + jsonl + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func draftsRoot() -> URL? {
@@ -454,6 +482,47 @@ public actor Session {
         var text: String
     }
 
+    private func structuralCheck(_ draft: Draft) -> [String] {
+        var warnings: [String] = []
+        if draft.ticketType == .story, !draft.title.hasPrefix("As a ") {
+            warnings.append("title does not match the Story convention")
+        }
+        if !draft.description.contains("---")
+            || !draft.description.contains("- ")
+        {
+            warnings.append("a Definition of Done is missing")
+        }
+        let forbidden = ["Requirements", "Technical Notes", "Dependencies", "Out of Scope"]
+        for line in draft.description.split(separator: "\n", omittingEmptySubsequences: false) {
+            var heading = line.trimmingCharacters(in: .whitespaces)
+            while heading.hasPrefix("#") {
+                heading = heading.dropFirst().trimmingCharacters(in: .whitespaces)
+            }
+            if forbidden.contains(where: { heading.compare($0, options: .caseInsensitive) == .orderedSame })
+            {
+                warnings.append("description contains a forbidden heading")
+                break
+            }
+        }
+        if draft.description.utf8.count > 1_048_576 {
+            warnings.append("description exceeds the field cap")
+        }
+        return warnings
+    }
+
+    private func descriptionForSubmit(_ draft: Draft) -> String {
+        guard !draft.openQuestions.isEmpty else { return draft.description }
+        let bullets = draft.openQuestions.map { "- \($0)" }.joined(separator: "\n")
+        let section = "\(completenessPreamble)\n\(bullets)"
+        guard let horizontalRule = draft.description.range(of: "\n---") else {
+            return draft.description + "\n\n" + section
+        }
+        return draft.description.replacingCharacters(
+            in: horizontalRule,
+            with: "\n\n\(section)\n\n---"
+        )
+    }
+
     private func snapshot() -> State {
         State(
             field: field,
@@ -463,10 +532,13 @@ public actor Session {
             settings: settings,
             project: project,
             proposedProject: proposedProject,
-            textMaterialWarning: textMaterialWarning
+            textMaterialWarning: textMaterialWarning,
+            structuralWarnings: draft.map(structuralCheck) ?? []
         )
     }
 }
+
+private let completenessPreamble = "The reporter skipped these questions:"
 
 private func wikiMarkup(from markdown: String) -> String {
     markdown.split(separator: "\n", omittingEmptySubsequences: false).map { line in
@@ -521,8 +593,13 @@ private let writingRules = """
     Definition of Done mirrors the description. It never introduces new Scope.
     """
 
-private let generateInstruction = """
+private let draftJSONInstruction = """
     Reply with JSON only, no tools: ticketType (story, bug, or chore), title, shortLabel, description, openQuestions.
+    """
+
+private let sendInstruction = """
+    \(draftJSONInstruction)
+    Revise the Draft from the chat answer.
     """
 
 private let definitionOfDoneInstruction = """

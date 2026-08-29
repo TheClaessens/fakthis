@@ -137,6 +137,112 @@ import Fakthis
     #expect(confirmed.project?.ticketTypeMapping == mapping)
 }
 
+@Test func sendRevisesTheDraftFromAChatAnswerAndTypingAloneDoesNot() async throws {
+    let harness = Harness()
+    let question = "What should happen when the bin scan fails?"
+    let generated = try await harness.generateStory(openQuestions: [question])
+    #expect(generated.draft?.openQuestions == [question])
+    let requestsAfterGenerate = await harness.model.completeRequests.count
+
+    let answer = "show a blocking error and do not take items"
+    _ = try await harness.session.perform(.typeBrainDump(answer))
+    let typed = try await harness.session.state()
+    #expect(typed.field == answer)
+    #expect(typed.draft?.openQuestions == [question])
+    #expect(typed.draft?.title == StoryReply.title)
+    #expect(await harness.model.completeRequests.count == requestsAfterGenerate)
+
+    let revisedTitle =
+        "As a warehouse picker I want a bin scan error so that I do not pick from a failed scan"
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: revisedTitle,
+            shortLabel: "bin scan failure",
+            description: "When a **bin** scan fails, the **pick screen** shows a blocking error.",
+            openQuestions: []
+        )
+    )
+    let sent = try await harness.session.perform(.send)
+    #expect(sent.draft?.title == revisedTitle)
+    #expect(sent.draft?.openQuestions == [])
+    #expect(sent.draft?.id == generated.draft?.id)
+    #expect(sent.draft?.description.contains("blocking error") == true)
+    #expect(sent.draft?.description.contains("---") == true)
+    let requests = await harness.model.completeRequests
+    #expect(requests.count == requestsAfterGenerate + 2)
+    #expect(requests[requestsAfterGenerate].user.contains(answer))
+    #expect(requests[requestsAfterGenerate].user.contains(StoryReply.title))
+}
+
+@Test func submitWithUnansweredQuestionsAppliesCompletenessMarkerAndSectionAboveTheHorizontalRule()
+    async throws
+{
+    let harness = Harness()
+    let question = "What should happen when the bin scan fails?"
+    _ = try await harness.generateStory(openQuestions: [question])
+    let state = try await harness.session.perform(.submit)
+    #expect(state.draft?.key == TicketKey("FAK-1"))
+
+    let ticket = try #require(await harness.jira.created.first)
+    #expect(ticket.completenessMarker == .apply)
+    #expect(ticket.descriptionWiki.contains("The reporter skipped these questions:"))
+    #expect(ticket.descriptionWiki.contains("* \(question)"))
+    let section = try #require(ticket.descriptionWiki.range(of: "The reporter skipped these questions:"))
+    let horizontalRule = try #require(ticket.descriptionWiki.range(of: "----"))
+    #expect(section.lowerBound < horizontalRule.lowerBound)
+}
+
+@Test func submitAfterQuestionsAreAnsweredOmitsCompletenessMarkerAndSection() async throws {
+    let harness = Harness()
+    let question = "What should happen when the bin scan fails?"
+    _ = try await harness.generateStory(openQuestions: [question])
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: StoryReply.shortLabel,
+            description: StoryReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(
+        .typeBrainDump("show a blocking error and do not take items")
+    )
+    _ = try await harness.session.perform(.send)
+    let state = try await harness.session.perform(.submit)
+    #expect(state.draft?.key == TicketKey("FAK-1"))
+    #expect(state.draft?.openQuestions == [])
+
+    let ticket = try #require(await harness.jira.created.first)
+    #expect(ticket.completenessMarker == .clear)
+    #expect(!ticket.descriptionWiki.contains("The reporter skipped these questions:"))
+    #expect(!ticket.descriptionWiki.contains(question))
+    #expect(ticket.descriptionWiki.contains("----"))
+}
+
+@Test func structuralWarningsDoNotBlockSubmitOrApplyTheCompletenessLabel() async throws {
+    let harness = Harness()
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: "Scan the bin before picking",
+            shortLabel: "scan bin",
+            description: StoryReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(!generated.structuralWarnings.isEmpty)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(submitted.structuralWarnings.isEmpty == false)
+    let ticket = try #require(await harness.jira.created.first)
+    #expect(ticket.completenessMarker == CompletenessMarker.clear)
+}
+
 @Test func submitDoesNotQueryAttachmentPolicyWhenTheDraftHasNoMedia() async throws {
     let harness = Harness()
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
@@ -926,6 +1032,20 @@ private struct Harness {
             .appending(component: "FAK")
             .appending(component: "drafts")
             .appending(component: id)
+    }
+
+    func generateStory(openQuestions: [String] = []) async throws -> Session.State {
+        await model.replaceReply(
+            GenerateReply(
+                ticketType: .story,
+                title: StoryReply.title,
+                shortLabel: StoryReply.shortLabel,
+                description: StoryReply.firstPassDescription,
+                openQuestions: openQuestions
+            )
+        )
+        _ = try await session.perform(.typeBrainDump(StoryReply.brainDump))
+        return try await session.perform(.generate)
     }
 
     func writeProject(_ project: Project) throws {

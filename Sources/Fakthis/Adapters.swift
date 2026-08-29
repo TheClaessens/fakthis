@@ -30,7 +30,8 @@ public protocol Jira: Sendable {
         title: String,
         descriptionWiki: String,
         jiraIssueType: String,
-        parentKey: TicketKey?
+        parentKey: TicketKey?,
+        completenessMarker: CompletenessMarker
     ) async throws -> TicketKey
     func pullCatalog(projectKey: String) async throws -> Catalog
     func updateTicket(
@@ -51,7 +52,7 @@ public protocol Jira: Sendable {
     func createBlocksLink(blocker: TicketKey, blocked: TicketKey) async throws
 }
 
-public enum CompletenessMarker: Sendable {
+public enum CompletenessMarker: Equatable, Sendable {
     case apply
     case clear
 

@@ -23,7 +23,8 @@ public actor JiraCloud: Jira {
         title: String,
         descriptionWiki: String,
         jiraIssueType: String,
-        parentKey: TicketKey?
+        parentKey: TicketKey?,
+        completenessMarker: CompletenessMarker
     ) async throws -> TicketKey {
         var request = try await authorizedRequest(path: "/rest/api/2/issue", method: "POST")
         request.httpBody = try JSONEncoder().encode(
@@ -33,7 +34,8 @@ public actor JiraCloud: Jira {
                     summary: title,
                     description: descriptionWiki,
                     issuetype: .init(name: jiraIssueType),
-                    parent: parentKey.map { NamedKey(key: $0.value) }
+                    parent: parentKey.map { NamedKey(key: $0.value) },
+                    labels: completenessMarker == .apply ? [CompletenessMarker.jiraLabel] : nil
                 )
             )
         )
@@ -313,9 +315,10 @@ private struct CreateIssueFields: Encodable {
     var description: String
     var issuetype: NamedName
     var parent: NamedKey?
+    var labels: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case project, summary, description, issuetype, parent
+        case project, summary, description, issuetype, parent, labels
     }
 
     func encode(to encoder: Encoder) throws {
@@ -325,6 +328,7 @@ private struct CreateIssueFields: Encodable {
         try container.encode(description, forKey: .description)
         try container.encode(issuetype, forKey: .issuetype)
         try container.encodeIfPresent(parent, forKey: .parent)
+        try container.encodeIfPresent(labels, forKey: .labels)
     }
 }
 
