@@ -113,6 +113,28 @@ public struct Draft: Equatable, Sendable {
     }
 }
 
+public struct GenerateReply: Equatable, Sendable, Codable {
+    public var ticketType: TicketType
+    public var title: String
+    public var shortLabel: String
+    public var description: String
+    public var openQuestions: [String]
+
+    public init(
+        ticketType: TicketType,
+        title: String,
+        shortLabel: String,
+        description: String,
+        openQuestions: [String]
+    ) {
+        self.ticketType = ticketType
+        self.title = title
+        self.shortLabel = shortLabel
+        self.description = description
+        self.openQuestions = openQuestions
+    }
+}
+
 extension Catalog {
     func mergingPull(_ pulled: Catalog) -> Catalog {
         let local = rows.filter { $0.shortLabel != nil || $0.ticketType != nil }

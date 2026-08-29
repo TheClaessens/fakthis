@@ -1,17 +1,17 @@
 import Foundation
 import Fakthis
 
-struct ModelDraftRequest: Equatable, Sendable {
-    var brainDump: String
-    var catalog: Catalog
-    var projectTerms: [String]
+struct ModelCompleteRequest: Equatable, Sendable {
+    var system: String
+    var user: String
 }
 
 actor ScriptedModel: Model {
     var reply: GenerateReply
     let definitionOfDone: [String]
-    private(set) var draftRequests: [ModelDraftRequest] = []
-    private(set) var definitionOfDoneRequests: [String] = []
+    var failGenerate = false
+    private(set) var completeRequests: [ModelCompleteRequest] = []
+    private var awaitingDefinitionOfDone = false
 
     init(reply: GenerateReply, definitionOfDone: [String]) {
         self.reply = reply
@@ -22,19 +22,26 @@ actor ScriptedModel: Model {
         self.reply = reply
     }
 
-    func generateDraft(brainDump: String, catalog: Catalog, projectTerms: [String]) async throws
-        -> GenerateReply
-    {
-        draftRequests.append(
-            ModelDraftRequest(brainDump: brainDump, catalog: catalog, projectTerms: projectTerms)
-        )
-        return reply
+    func setFailGenerate(_ value: Bool) {
+        failGenerate = value
     }
 
-    func generateDefinitionOfDone(description: String) async throws -> [String] {
-        definitionOfDoneRequests.append(description)
-        return definitionOfDone
+    func complete(system: String, user: String) async throws -> String {
+        if failGenerate { throw ModelFailed() }
+        completeRequests.append(ModelCompleteRequest(system: system, user: user))
+        if awaitingDefinitionOfDone {
+            awaitingDefinitionOfDone = false
+            return try jsonString(definitionOfDone)
+        }
+        awaitingDefinitionOfDone = true
+        return try jsonString(reply)
     }
+}
+
+private func jsonString<T: Encodable>(_ value: T) throws -> String {
+    let data = try JSONEncoder().encode(value)
+    guard let text = String(data: data, encoding: .utf8) else { throw ModelFailed() }
+    return text
 }
 
 struct CreatedTicket: Equatable, Sendable {

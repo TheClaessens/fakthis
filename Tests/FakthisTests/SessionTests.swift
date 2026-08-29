@@ -217,8 +217,8 @@ import Fakthis
 
     #expect(generated.catalog.rows.first?.title == "Scan tote before pick")
     #expect(generated.catalog.rows.first?.key == TicketKey("FAK-231"))
-    let sent = try #require(await harness.model.draftRequests.last?.catalog)
-    #expect(sent.rows.first?.title == "Scan tote before pick")
+    let sent = try #require(await harness.model.completeRequests.first?.system)
+    #expect(sent.contains("Scan tote before pick"))
     try await waitUntil { await harness.jira.catalogPulls.count == 1 }
 
     await harness.jira.setHoldPulls(false)
@@ -270,14 +270,14 @@ import Fakthis
     #expect(row.title == "Scan tote before pick")
     #expect(state.catalog.componentNames == ["Pick App"])
 
-    let draftRequests = await harness.model.draftRequests
-    let sent = try #require(draftRequests.last?.catalog)
-    #expect(sent.rows.first?.title == "Scan tote before pick")
-    #expect(!catalogText(sent).contains("FAK-231 body must not reach Generate"))
+    let requests = await harness.model.completeRequests
+    let sent = try #require(requests.dropLast().last?.system)
+    #expect(sent.contains("Scan tote before pick"))
+    #expect(!sent.contains("FAK-231 body must not reach Generate"))
 }
 
 @Test func generateSendsCatalogContextToTheModelAndNotAnotherIssueBody() async throws {
-    let harness = Harness()
+    let harness = Harness(terms: ["bin", "pick screen"])
     let otherIssueBody =
         "Steps to reproduce: open the pick screen. This is FAK-231's body and is Scope."
     let otherIssueComment = "The cause is a race in BinScanner."
@@ -322,18 +322,30 @@ import Fakthis
     #expect(row.parentEpicKey == TicketKey("FAK-100"))
     #expect(row.status == "To Do")
 
-    let draftRequests = await harness.model.draftRequests
-    #expect(draftRequests.count == 1)
-    let sent = draftRequests[0].catalog
-    let sentRow = try #require(sent.rows.first)
-    #expect(sent.epics == state.catalog.epics)
-    #expect(sentRow.title == "Scan tote before pick")
-    #expect(sentRow.labels == ["picking"])
-    #expect(sentRow.parentEpicKey == TicketKey("FAK-100"))
-    #expect(sent.componentNames == ["Pick App"])
-    #expect(!catalogText(sent).contains(otherIssueBody))
-    #expect(!catalogText(sent).contains(otherIssueComment))
-    #expect(!catalogText(sent).contains(epicDescription))
+    let requests = await harness.model.completeRequests
+    #expect(requests.count == 2)
+    let generateSystem = requests[0].system
+    #expect(requests[0].user == StoryReply.brainDump)
+    #expect(generateSystem.contains("FAK-100"))
+    #expect(generateSystem.contains("Warehouse picking"))
+    #expect(generateSystem.contains("In Progress"))
+    #expect(generateSystem.contains("FAK-231"))
+    #expect(generateSystem.contains("Scan tote before pick"))
+    #expect(generateSystem.contains("picking"))
+    #expect(generateSystem.contains("Pick App"))
+    #expect(generateSystem.contains("bin"))
+    #expect(generateSystem.contains("pick screen"))
+    #expect(generateSystem.contains("Never invent Scope"))
+    #expect(!generateSystem.contains(otherIssueBody))
+    #expect(!generateSystem.contains(otherIssueComment))
+    #expect(!generateSystem.contains(epicDescription))
+
+    #expect(requests[1].user == StoryReply.firstPassDescription)
+    #expect(requests[1].system.contains("FAK-231"))
+    #expect(requests[1].system.contains("bin"))
+    #expect(requests[1].system.contains("pick screen"))
+    #expect(!requests[1].system.contains(otherIssueBody))
+    #expect(!requests[1].user.contains(StoryReply.brainDump))
 }
 
 @Test func unreachableJiraWithNoPriorPullLeavesEmptyCatalogAndGenerateStillRuns() async throws {
@@ -361,10 +373,11 @@ import Fakthis
     #expect(state.catalog.rows.isEmpty)
     #expect(state.catalog.componentNames.isEmpty)
 
-    let draftRequests = await harness.model.draftRequests
-    #expect(draftRequests.count == 1)
-    #expect(draftRequests[0].catalog.rows.isEmpty)
-    #expect(draftRequests[0].catalog.epics.isEmpty)
+    let requests = await harness.model.completeRequests
+    #expect(requests.count == 2)
+    #expect(requests[0].system.contains("Catalog"))
+    #expect(!requests[0].system.contains("Warehouse picking"))
+    #expect(requests[0].user == StoryReply.brainDump)
 }
 
 @Test func generateProducesStoryDraftFromTypedBrainDumpWhenCatalogIsEmpty() async throws {
@@ -383,14 +396,14 @@ import Fakthis
     #expect(draft.description.contains(StoryReply.definitionOfDone))
     #expect(state.catalog.rows.isEmpty)
 
-    let draftRequests = await harness.model.draftRequests
-    #expect(draftRequests.count == 1)
-    #expect(draftRequests[0].brainDump == StoryReply.brainDump)
-    #expect(draftRequests[0].catalog.rows.isEmpty)
-    #expect(draftRequests[0].projectTerms.isEmpty)
+    let requests = await harness.model.completeRequests
+    #expect(requests.count == 2)
+    #expect(requests[0].user == StoryReply.brainDump)
+    #expect(!requests[0].system.contains("FAK-"))
+    #expect(requests[0].system.contains("Never invent Scope"))
 
-    let doneRequests = await harness.model.definitionOfDoneRequests
-    #expect(doneRequests == [StoryReply.firstPassDescription])
+    #expect(requests[1].user == StoryReply.firstPassDescription)
+    #expect(requests[1].system.contains("Never invent Scope"))
 }
 
 @Test func restartingSessionShowsTheInProgressDraftFromDisk() async throws {
@@ -575,6 +588,53 @@ import Fakthis
     #expect(await harness.jira.created.count == 1)
 }
 
+@Test func failedGenerateLeavesTheDraftAndRetrySucceeds() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    await harness.model.setFailGenerate(true)
+    let failed = try await harness.session.perform(.generate)
+    #expect(failed.draft == nil)
+    #expect(failed.field == StoryReply.brainDump)
+    #expect(await harness.model.completeRequests.isEmpty)
+
+    await harness.model.setFailGenerate(false)
+    let retried = try await harness.session.perform(.generate)
+    let draft = try #require(retried.draft)
+    #expect(draft.title == StoryReply.title)
+    #expect(draft.description.contains(StoryReply.definitionOfDone))
+    #expect(await harness.model.completeRequests.count == 2)
+}
+
+@Test func failedGenerateLeavesAnExistingDraftAndRetryRevisesIt() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let first = try await harness.session.perform(.generate)
+    let original = try #require(first.draft)
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: "As a picker I want a retry so that a failed Generate is not data loss",
+            shortLabel: "retry after fail",
+            description: "Revised after the model recovered.",
+            openQuestions: []
+        )
+    )
+    await harness.model.setFailGenerate(true)
+    let failed = try await harness.session.perform(.generate)
+    #expect(failed.draft?.id == original.id)
+    #expect(failed.draft?.title == original.title)
+    #expect(failed.draft?.description == original.description)
+
+    await harness.model.setFailGenerate(false)
+    let retried = try await harness.session.perform(.generate)
+    #expect(retried.draft?.id == original.id)
+    #expect(
+        retried.draft?.title
+            == "As a picker I want a retry so that a failed Generate is not data loss"
+    )
+}
+
 @Test func unreachableJiraAtSubmitLeavesTheDraftAndRetrySucceeds() async throws {
     let harness = Harness()
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
@@ -650,7 +710,10 @@ private struct Harness {
     let project: Project
     let session: Session
 
-    init(ticketTypeMapping: [TicketType: String] = [.story: "Story"]) {
+    init(
+        ticketTypeMapping: [TicketType: String] = [.story: "Story"],
+        terms: [String] = []
+    ) {
         let model = ScriptedModel(
             reply: GenerateReply(
                 ticketType: .story,
@@ -663,7 +726,7 @@ private struct Harness {
         )
         let jira = FakeJira()
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
-        let project = Project(key: "FAK", ticketTypeMapping: ticketTypeMapping, terms: [])
+        let project = Project(key: "FAK", ticketTypeMapping: ticketTypeMapping, terms: terms)
         self.model = model
         self.jira = jira
         self.root = root

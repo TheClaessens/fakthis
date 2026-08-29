@@ -1,31 +1,7 @@
 import Foundation
 
-public struct GenerateReply: Equatable, Sendable {
-    public var ticketType: TicketType
-    public var title: String
-    public var shortLabel: String
-    public var description: String
-    public var openQuestions: [String]
-
-    public init(
-        ticketType: TicketType,
-        title: String,
-        shortLabel: String,
-        description: String,
-        openQuestions: [String]
-    ) {
-        self.ticketType = ticketType
-        self.title = title
-        self.shortLabel = shortLabel
-        self.description = description
-        self.openQuestions = openQuestions
-    }
-}
-
 public protocol Model: Sendable {
-    func generateDraft(brainDump: String, catalog: Catalog, projectTerms: [String]) async throws
-        -> GenerateReply
-    func generateDefinitionOfDone(description: String) async throws -> [String]
+    func complete(system: String, user: String) async throws -> String
 }
 
 public protocol Jira: Sendable {
@@ -110,6 +86,10 @@ public struct RewriteTarget: Equatable, Sendable {
 }
 
 public struct JiraUnreachable: Error {
+    public init() {}
+}
+
+public struct ModelFailed: Error {
     public init() {}
 }
 
