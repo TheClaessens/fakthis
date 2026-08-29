@@ -194,6 +194,74 @@ public struct Rewrite: Equatable, Sendable, Codable {
     }
 }
 
+public struct BatchSibling: Equatable, Sendable {
+    public var id: String
+    public var shortLabel: String
+    public var epicKey: TicketKey?
+    public var ticketType: TicketType?
+    public var key: TicketKey?
+    public var openQuestions: [String]
+
+    public init(
+        id: String,
+        shortLabel: String,
+        epicKey: TicketKey? = nil,
+        ticketType: TicketType? = nil,
+        key: TicketKey? = nil,
+        openQuestions: [String] = []
+    ) {
+        self.id = id
+        self.shortLabel = shortLabel
+        self.epicKey = epicKey
+        self.ticketType = ticketType
+        self.key = key
+        self.openQuestions = openQuestions
+    }
+}
+
+public struct Batch: Equatable, Sendable {
+    public var name: String
+    public var siblings: [BatchSibling]
+    public var focusedDraftId: String
+    public var blocks: [String]
+    public var offerRegenerateDraft1: Bool
+    public var defaultEpicKey: TicketKey?
+    public var duplicates: [BatchDuplicate]
+    public var id: String
+
+    public init(
+        name: String,
+        siblings: [BatchSibling],
+        focusedDraftId: String,
+        blocks: [String],
+        offerRegenerateDraft1: Bool = false,
+        defaultEpicKey: TicketKey? = nil,
+        duplicates: [BatchDuplicate] = [],
+        id: String = UUID().uuidString
+    ) {
+        self.name = name
+        self.siblings = siblings
+        self.focusedDraftId = focusedDraftId
+        self.blocks = blocks
+        self.offerRegenerateDraft1 = offerRegenerateDraft1
+        self.defaultEpicKey = defaultEpicKey
+        self.duplicates = duplicates
+        self.id = id
+    }
+}
+
+public struct BatchDuplicate: Equatable, Sendable {
+    public var draftId: String
+    public var shortLabel: String
+    public var hit: DuplicateHit
+
+    public init(draftId: String, shortLabel: String, hit: DuplicateHit) {
+        self.draftId = draftId
+        self.shortLabel = shortLabel
+        self.hit = hit
+    }
+}
+
 public struct Draft: Equatable, Sendable {
     public var id: String
     public var ticketType: TicketType

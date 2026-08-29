@@ -149,6 +149,7 @@ struct CreatedTicket: Equatable, Sendable {
     var descriptionWiki: String
     var jiraIssueType: String
     var completenessMarker: CompletenessMarker
+    var parentKey: TicketKey?
 }
 
 struct UpdatedTicket: Equatable, Sendable {
@@ -181,6 +182,7 @@ struct SeededIssue: Sendable {
 actor FakeJira: Jira {
     var unreachable = false
     var failUploads = false
+    var failOnCreate: Int?
     var nextKey = TicketKey("FAK-1")
     private(set) var created: [CreatedTicket] = []
     private(set) var updated: [UpdatedTicket] = []
@@ -208,15 +210,23 @@ actor FakeJira: Jira {
     ) async throws -> TicketKey
     {
         if unreachable { throw JiraUnreachable() }
+        if let failOnCreate, created.count + 1 == failOnCreate {
+            throw JiraUnreachable()
+        }
         created.append(
             CreatedTicket(
                 title: title,
                 descriptionWiki: descriptionWiki,
                 jiraIssueType: jiraIssueType,
-                completenessMarker: completenessMarker
+                completenessMarker: completenessMarker,
+                parentKey: parentKey
             )
         )
-        return nextKey
+        let key = nextKey
+        if let number = Int(key.value.split(separator: "-").last ?? "") {
+            nextKey = TicketKey("FAK-\(number + 1)")
+        }
+        return key
     }
 
     func updateTicket(
@@ -349,6 +359,10 @@ actor FakeJira: Jira {
 
     func setFailUploads(_ value: Bool) {
         failUploads = value
+    }
+
+    func setFailOnCreate(_ value: Int?) {
+        failOnCreate = value
     }
 
     func setUnreachable(_ value: Bool) {
