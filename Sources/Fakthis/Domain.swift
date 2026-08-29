@@ -169,6 +169,31 @@ public struct RelatedHit: Equatable, Sendable {
     }
 }
 
+public struct Rewrite: Equatable, Sendable, Codable {
+    public var liveTitle: String
+    public var liveDescription: String
+    public var comments: [String]
+    public var commentsTruncated: Bool
+    public var watchersNote: String
+    public var stale: Bool
+
+    public init(
+        liveTitle: String,
+        liveDescription: String,
+        comments: [String],
+        commentsTruncated: Bool,
+        watchersNote: String,
+        stale: Bool
+    ) {
+        self.liveTitle = liveTitle
+        self.liveDescription = liveDescription
+        self.comments = comments
+        self.commentsTruncated = commentsTruncated
+        self.watchersNote = watchersNote
+        self.stale = stale
+    }
+}
+
 public struct Draft: Equatable, Sendable {
     public var id: String
     public var ticketType: TicketType

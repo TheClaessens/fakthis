@@ -2,6 +2,821 @@ import Foundation
 import Testing
 import Fakthis
 
+@Test func pasteKeyFetchesLiveBodyAsMaterialAndBindsAnEmptyDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "The live description is messy.",
+                comments: ["newest comment", "older comment"]
+            )
+        ],
+        componentNames: []
+    )
+
+    let state = try await harness.session.perform(.pasteKey("FAK-231"))
+    let draft = try #require(state.draft)
+    #expect(draft.key == TicketKey("FAK-231"))
+    #expect(draft.title.isEmpty)
+    #expect(draft.description.isEmpty)
+    #expect(draft.shortLabel.isEmpty)
+    let rewrite = try #require(state.rewrite)
+    #expect(rewrite.liveTitle == "Scan tote before pick")
+    #expect(rewrite.liveDescription == "The live description is messy.")
+    #expect(rewrite.comments == ["newest comment", "older comment"])
+    #expect(rewrite.watchersNote.contains("FAK-231") == true)
+    #expect(await harness.model.completeRequests.isEmpty)
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func pasteKeyOnAMissingTicketIsAnErrorNotACreate() async throws {
+    let harness = Harness()
+    let state = try await harness.session.perform(.pasteKey("FAK-404"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == "FAK-404 was not found")
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func pasteKeyRejectsAnotherProjectsKey() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "ABC-1",
+                title: "Other project ticket",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Must not become Material",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    let state = try await harness.session.perform(.pasteKey("ABC-1"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == "ABC-1 is not in this Project")
+    #expect(await harness.jira.fetchRewriteCalls.isEmpty)
+}
+
+@Test func pasteKeyRejectsAnEpicKey() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [
+            SeededEpic(
+                key: "FAK-100",
+                name: "Warehouse picking",
+                status: "In Progress",
+                description: "Epic Scope"
+            )
+        ],
+        issues: [
+            SeededIssue(
+                key: "FAK-100",
+                title: "Warehouse picking",
+                jiraIssueType: "Epic",
+                labels: [],
+                parentEpicKey: nil,
+                status: "In Progress",
+                created: Date(),
+                body: "Epic Scope must not become a rewrite Draft",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    let state = try await harness.session.perform(.pasteKey("FAK-100"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == "FAK-100 is an epic")
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func unreachableJiraAtPasteKeyDoesNotStartARewrite() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "must not become Material",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.setUnreachable(true)
+    let state = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == nil)
+}
+
+@Test func emptyGenerateOnARewriteReshapesFromMaterialAndInventsNoScope() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Pickers scan a tote. Steps are missing.",
+                comments: ["The expected result is still blank."]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.key == TicketKey("FAK-231"))
+    #expect(draft.title == StoryReply.title)
+    #expect(draft.shortLabel == StoryReply.shortLabel)
+    #expect(draft.description.contains(StoryReply.definitionOfDone))
+
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.user.contains("Pickers scan a tote. Steps are missing."))
+    #expect(request.user.contains("The expected result is still blank."))
+    #expect(request.system.contains("Never invent Scope"))
+    #expect(request.system.contains("Reshape"))
+}
+
+@Test func updateWritesTitleDescriptionAndCompletenessMarkerAndDoesNotChangeJiraIssueType()
+    async throws
+{
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Bug",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The pick screen is wrong.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let ready = try await harness.session.perform(.generate)
+    #expect(ready.rewrite?.watchersNote.contains("FAK-231") == true)
+    let updated = try await harness.session.perform(.update)
+    #expect(updated.draft?.key == TicketKey("FAK-231"))
+    #expect(updated.rewrite == nil)
+
+    #expect(await harness.jira.created.isEmpty)
+    let write = try #require(await harness.jira.updated.first)
+    #expect(write.key == TicketKey("FAK-231"))
+    #expect(write.title == StoryReply.title)
+    #expect(write.descriptionWiki.contains("----"))
+    #expect(write.completenessMarker == .clear)
+
+    let row = try #require(updated.catalog.rows.first { $0.key == TicketKey("FAK-231") })
+    #expect(row.shortLabel == StoryReply.shortLabel)
+    #expect(row.ticketType == .story)
+}
+
+@Test func leftoverCreateSubmitDoesNotWriteOverTheLiveTicket() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let created = try await harness.session.perform(.generate)
+    let createId = try #require(created.draft?.id)
+    #expect(created.draft?.key == nil)
+
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-231"))
+    #expect(await harness.jira.created.isEmpty)
+    #expect(
+        FileManager.default.fileExists(atPath: harness.draftFolder(id: createId).path)
+    )
+}
+
+@Test func keepLiveTitlePutsTheFetchedTitleOnTheDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.draft?.title == StoryReply.title)
+    let kept = try await harness.session.perform(.keepLiveTitle)
+    #expect(kept.draft?.title == "Scan tote before pick")
+    #expect(kept.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func workOnDuplicateOfAJiraKeyOpensTheRewriteLoop() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body as Material",
+                comments: ["a comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.duplicateInterrupt?.key == TicketKey("FAK-231"))
+
+    let rewritten = try await harness.session.perform(.workOnDuplicate)
+    #expect(rewritten.duplicateInterrupt == nil)
+    #expect(rewritten.draft?.key == TicketKey("FAK-231"))
+    #expect(rewritten.draft?.title.isEmpty == true)
+    #expect(rewritten.rewrite?.liveDescription == "Live body as Material")
+    #expect(rewritten.rewrite?.comments == ["a comment"])
+}
+
+@Test func staleJiraAtUpdateWarnsAndRefetchKeepsTheDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Original live body",
+                comments: ["old comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let title = try #require(generated.draft?.title)
+
+    await harness.jira.replaceIssue(
+        key: "FAK-231",
+        title: "Scan tote before pick",
+        body: "Someone edited this in Jira",
+        comments: ["new comment"],
+        updated: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    let warned = try await harness.session.perform(.update)
+    #expect(warned.rewrite?.stale == true)
+    #expect(warned.draft?.title == title)
+    #expect(await harness.jira.updated.isEmpty)
+
+    let refreshed = try await harness.session.perform(.refetch)
+    #expect(refreshed.rewrite?.stale == false)
+    #expect(refreshed.rewrite?.liveDescription == "Someone edited this in Jira")
+    #expect(refreshed.rewrite?.comments == ["new comment"])
+    #expect(refreshed.draft?.title == title)
+
+    let written = try await harness.session.perform(.update)
+    #expect(await harness.jira.updated.count == 1)
+    #expect(written.draft?.title == title)
+}
+
+@Test func staleJiraAtUpdateClobberWritesAnywayAndKeepsTheDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Original live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let title = try #require(generated.draft?.title)
+
+    await harness.jira.replaceIssue(
+        key: "FAK-231",
+        title: "Scan tote before pick",
+        body: "Someone edited this in Jira",
+        comments: [],
+        updated: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    _ = try await harness.session.perform(.update)
+    #expect(await harness.jira.updated.isEmpty)
+
+    let written = try await harness.session.perform(.clobber)
+    #expect(written.draft?.title == title)
+    #expect(await harness.jira.updated.count == 1)
+}
+
+@Test func updateDoesNotRequireGenerate() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.keepLiveTitle)
+    let updated = try await harness.session.perform(.update)
+    #expect(await harness.jira.created.isEmpty)
+    let write = try #require(await harness.jira.updated.first)
+    #expect(write.key == TicketKey("FAK-231"))
+    #expect(write.title == "Scan tote before pick")
+    #expect(updated.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func afterUpdateGenerateDoesNotKeepEditingTheTicket() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let updated = try await harness.session.perform(.update)
+    #expect(updated.rewrite == nil)
+    #expect(await harness.jira.updated.count == 1)
+
+    _ = try await harness.session.perform(.generate)
+    #expect(await harness.model.completeRequests.count == 2)
+}
+
+@Test func updateUpsertsTheCatalogRowWithShortLabelAndTicketType() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["warehouse"],
+                parentEpicKey: TicketKey("FAK-100"),
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["warehouse"],
+                parentEpicKey: "FAK-100",
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let updated = try await harness.session.perform(.update)
+    let row = try #require(updated.catalog.rows.first { $0.key == TicketKey("FAK-231") })
+    #expect(row.shortLabel == StoryReply.shortLabel)
+    #expect(row.ticketType == .story)
+    #expect(row.labels == ["warehouse"])
+    #expect(row.parentEpicKey == TicketKey("FAK-100"))
+    #expect(row.status == "To Do")
+    #expect(row.jiraIssueType == "Story")
+}
+
+@Test func unreachableJiraAtUpdateLeavesTheDraftAndRetrySucceeds() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    await harness.jira.setUnreachable(true)
+    let blocked = try await harness.session.perform(.update)
+    #expect(blocked.draft?.key == TicketKey("FAK-231"))
+    #expect(blocked.rewrite != nil)
+    #expect(await harness.jira.updated.isEmpty)
+
+    await harness.jira.setUnreachable(false)
+    let retried = try await harness.session.perform(.update)
+    #expect(await harness.jira.updated.count == 1)
+    #expect(retried.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func pasteKeyDoesNotDownloadExistingAttachments() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(await harness.jira.uploadAttachmentCalls == 0)
+    #expect(await harness.jira.attachmentPolicyCalls == 0)
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func restartKeepsARewriteDraftBoundToTheKey() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The live description is messy.",
+                comments: ["newest comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let title = try #require(generated.draft?.title)
+
+    let restarted = harness.reopen()
+    let restored = try await restarted.state()
+    #expect(restored.draft?.key == TicketKey("FAK-231"))
+    #expect(restored.draft?.title == title)
+    #expect(restored.rewrite?.liveDescription == "The live description is messy.")
+    #expect(restored.rewrite?.comments == ["newest comment"])
+
+    let written = try await restarted.perform(.update)
+    #expect(await harness.jira.updated.count == 1)
+    #expect(written.draft?.title == title)
+}
+
+@Test func leftoverCreateFolderOnRestartStillDoesNotSubmitOverTheLiveTicket() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let created = try await harness.session.perform(.generate)
+    let createId = try #require(created.draft?.id)
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+
+    let restarted = harness.reopen()
+    let submitted = try await restarted.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-231"))
+    #expect(await harness.jira.created.isEmpty)
+    #expect(
+        FileManager.default.fileExists(atPath: harness.draftFolder(id: createId).path)
+    )
+}
+
+@Test func sendOnARewriteRevisesTheDraftAndDoesNotCreate() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: "As a warehouse picker I want to scan a tote so that I pick from the right location",
+            shortLabel: StoryReply.shortLabel,
+            description: "Revised from the chat answer.",
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump("call it a tote, not a bin"))
+    let sent = try await harness.session.perform(.send)
+    #expect(sent.draft?.key == TicketKey("FAK-231"))
+    #expect(sent.draft?.description.contains("Revised from the chat answer") == true)
+    #expect(await harness.jira.created.isEmpty)
+    #expect(await harness.jira.updated.isEmpty)
+}
+
+@Test func spokenAskOnARewriteReplacesTheField() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    await harness.transcriber.enqueueTake("call it a tote, not a bin")
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.typeBrainDump("typed ask"))
+    _ = try await harness.session.perform(.startListening)
+    let committed = try await harness.session.perform(.stopListening)
+    #expect(committed.field == "call it a tote, not a bin")
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
+@Test func refetchKeepsFilesThePMAttached() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Original live body",
+                comments: ["old comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "client-email.txt",
+                mimeType: "text/plain",
+                data: Data("Please fix the tote scan.".utf8)
+            )
+        )
+    )
+    await harness.jira.replaceIssue(
+        key: "FAK-231",
+        title: "Scan tote before pick",
+        body: "Someone edited this in Jira",
+        comments: ["new comment"],
+        updated: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    let refreshed = try await harness.session.perform(.refetch)
+    #expect(refreshed.rewrite?.liveDescription == "Someone edited this in Jira")
+    #expect(refreshed.rewrite?.comments == ["new comment"])
+    let generated = try await harness.session.perform(.generate)
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.user.contains("Please fix the tote scan."))
+    #expect(request.user.contains("Someone edited this in Jira"))
+    #expect(generated.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func rewriteGenerateHintsTicketTypeWhenJiraIssueTypeMapsOneToOne() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Bug",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The pick screen is wrong.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.system.contains("Jira issue type Bug maps 1:1 to bug"))
+}
+
+@Test func rewriteGenerateDoesNotHintTicketTypeWhenJiraIssueTypeMapsManyToOne() async throws {
+    let harness = Harness(ticketTypeMapping: [
+        .story: "Task",
+        .bug: "Task",
+        .chore: "Task",
+    ])
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Task",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The pick screen is wrong.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.system.contains("maps 1:1") == false)
+}
+
+@Test func rewriteCommentsCapAtFiftyAndSaySoWhenTruncated() async throws {
+    let harness = Harness()
+    let comments = (1...51).map { "comment \($0)" }
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: comments
+            )
+        ],
+        componentNames: []
+    )
+    let state = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(state.rewrite?.comments.count == 50)
+    #expect(state.rewrite?.comments.first == "comment 1")
+    #expect(state.rewrite?.commentsTruncated == true)
+}
+
 @Test func dumpToggleAppendsTheTakeAndGenerateIsASeparatePress() async throws {
     let harness = Harness()
     await harness.transcriber.enqueueTake(

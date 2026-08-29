@@ -132,7 +132,6 @@ public actor JiraCloud: Jira {
             .sorted {
                 (jiraDate($0.created) ?? .distantPast) > (jiraDate($1.created) ?? .distantPast)
             }
-            .prefix(50)
             .map(\.body) ?? []
         return RewriteTarget(
             key: TicketKey(decoded.key),

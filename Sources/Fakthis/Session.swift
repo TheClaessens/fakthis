@@ -20,6 +20,11 @@ public actor Session {
         case tickRelated(TicketKey)
         case startListening
         case stopListening
+        case pasteKey(String)
+        case update
+        case keepLiveTitle
+        case refetch
+        case clobber
     }
 
     public enum Status: Equatable, Sendable {
@@ -44,6 +49,8 @@ public actor Session {
         public var duplicateInterrupt: DuplicateHit?
         public var related: [RelatedHit]
         public var status: Status
+        public var rewrite: Rewrite?
+        public var rewriteError: String?
     }
 
     private var project: Project?
@@ -68,6 +75,9 @@ public actor Session {
     private var duplicateInterrupt: DuplicateHit?
     private var related: [RelatedHit] = []
     private var status: Status = .yourTurn
+    private var rewrite: Rewrite?
+    private var rewriteError: String?
+    private var fetched: RewriteTarget?
 
     public init(
         applicationSupport: URL,
@@ -130,7 +140,7 @@ public actor Session {
         case .dismissDuplicate:
             duplicateInterrupt = nil
         case .workOnDuplicate:
-            try workOnDuplicate()
+            try await workOnDuplicate()
         case .tickRelated(let key):
             tickRelated(key)
         case .startListening:
@@ -139,6 +149,20 @@ public actor Session {
         case .stopListening:
             startBackgroundRefreshIfStale()
             try await stopListening()
+        case .pasteKey(let key):
+            startBackgroundRefreshIfStale()
+            try await pasteKey(key)
+        case .update:
+            startBackgroundRefreshIfStale()
+            try await update()
+        case .keepLiveTitle:
+            keepLiveTitle()
+        case .refetch:
+            startBackgroundRefreshIfStale()
+            try await refetch()
+        case .clobber:
+            startBackgroundRefreshIfStale()
+            try await clobber()
         }
         return snapshot()
     }
@@ -423,6 +447,10 @@ public actor Session {
     }
 
     private func commitTake(_ take: String) {
+        if rewrite != nil {
+            field = take
+            return
+        }
         if let draft, draft.key == nil {
             field = take
             return
@@ -431,14 +459,116 @@ public actor Session {
         field = trimmed.isEmpty ? take : trimmed + " " + take
     }
 
+    private var isUploadQueue: Bool {
+        draft?.key != nil && rewrite == nil
+    }
+
+    private func update() async throws {
+        guard let live = try await liveForWrite() else { return }
+        if let fetched, live.updated > fetched.updated {
+            var rewrite = rewrite
+            rewrite?.stale = true
+            self.rewrite = rewrite
+            return
+        }
+        try await putRewrite(live)
+    }
+
+    private func clobber() async throws {
+        guard let live = try await liveForWrite() else { return }
+        try await putRewrite(live)
+    }
+
+    private func liveForWrite() async throws -> RewriteTarget? {
+        guard let key = draft?.key, rewrite != nil else { return nil }
+        do {
+            return try await jira.fetchRewriteTarget(key: key)
+        } catch is JiraUnreachable {
+            return nil
+        } catch is JiraHTTPError {
+            return nil
+        }
+    }
+
+    private func putRewrite(_ live: RewriteTarget) async throws {
+        guard let draft, let key = draft.key else { return }
+        do {
+            try await jira.updateTicket(
+                key: key,
+                title: draft.title,
+                descriptionWiki: wikiMarkup(from: descriptionForSubmit(draft)),
+                completenessMarker: draft.openQuestions.isEmpty ? .clear : .apply
+            )
+        } catch is JiraUnreachable {
+            return
+        }
+        fetched = live
+        rewrite = nil
+        upsertCatalogRow(for: draft, key: key, jiraIssueType: live.jiraIssueType)
+        try persistDraft()
+        try persistCatalog()
+        await uploadPending(key: key)
+        if !failedUploads.isEmpty {
+            try persistDraft()
+        }
+    }
+
+    private func upsertCatalogRow(for draft: Draft, key: TicketKey, jiraIssueType: String) {
+        if let index = catalog.rows.firstIndex(where: { $0.key == key }) {
+            catalog.rows[index].title = draft.title
+            catalog.rows[index].shortLabel = draft.shortLabel
+            catalog.rows[index].ticketType = draft.ticketType
+            return
+        }
+        catalog.rows.append(
+            CatalogRow(
+                key: key,
+                title: draft.title,
+                jiraIssueType: jiraIssueType,
+                shortLabel: draft.shortLabel,
+                ticketType: draft.ticketType
+            )
+        )
+    }
+
+    private func refetch() async throws {
+        guard let key = draft?.key, rewrite != nil else { return }
+        let target: RewriteTarget
+        do {
+            target = try await jira.fetchRewriteTarget(key: key)
+        } catch is JiraUnreachable {
+            return
+        } catch is JiraHTTPError {
+            return
+        }
+        showLive(target)
+        replaceLiveMaterial()
+        try persistDraft()
+        try persistMaterial()
+    }
+
     private func generate() async throws {
-        if draft?.key != nil { return }
+        if isUploadQueue { return }
         guard project != nil else { return }
         try await reviseDraft(
             user: generateUserMessage(),
-            instruction: generateInstruction,
+            instruction: rewrite == nil ? generateInstruction : rewriteInstruction(),
             screenshots: material.filter(\.isScreenshot)
         )
+    }
+
+    private func rewriteInstruction() -> String {
+        guard let jiraType = fetched?.jiraIssueType,
+            let mapping = project?.ticketTypeMapping
+        else { return rewriteGenerateInstruction }
+        let matches = mapping.filter { $0.value == jiraType }
+        guard matches.count == 1, let ticketType = matches.first?.key else {
+            return rewriteGenerateInstruction
+        }
+        return """
+            \(rewriteGenerateInstruction)
+            Jira issue type \(jiraType) maps 1:1 to \(ticketType.rawValue).
+            """
     }
 
     private func generateUserMessage() -> String {
@@ -448,7 +578,7 @@ public actor Session {
     }
 
     private func send() async throws {
-        guard let draft, draft.key == nil, project != nil else { return }
+        guard let draft, !isUploadQueue, project != nil else { return }
         try await reviseDraft(
             user: draftAndAnswerMessage(draft),
             instruction: sendInstruction,
@@ -457,7 +587,7 @@ public actor Session {
     }
 
     private func changeTicketType(_ ticketType: TicketType) async throws {
-        guard let draft, draft.key == nil, project != nil else { return }
+        guard let draft, !isUploadQueue, project != nil else { return }
         try await reviseDraft(
             user: reshapeUserMessage(draft),
             instruction: reshapeInstruction(ticketType),
@@ -512,18 +642,113 @@ public actor Session {
         related[index].ticked.toggle()
     }
 
-    private func workOnDuplicate() throws {
-        guard case .localDraft(let id, _, _)? = duplicateInterrupt else { return }
-        guard let folder = draftsRoot()?.appending(component: id),
-            let stored = try storedDraft(in: folder)
-        else { return }
-        draft = stored.draft
-        draftId = stored.draft.id
-        failedUploads = stored.failedUploads
-        blockedUploads = []
-        material = try loadMaterial()
-        try refreshMatches()
-        duplicateInterrupt = nil
+    private func pasteKey(_ raw: String) async throws {
+        guard let project else { return }
+        rewriteError = nil
+        let key = TicketKey(raw)
+        if !key.value.hasPrefix("\(project.key)-") {
+            rewriteError = "\(key.value) is not in this Project"
+            return
+        }
+        let target: RewriteTarget
+        do {
+            target = try await jira.fetchRewriteTarget(key: key)
+        } catch is JiraUnreachable {
+            return
+        } catch let error as JiraHTTPError where error.statusCode == 404 {
+            rewriteError = "\(key.value) was not found"
+            return
+        } catch is JiraHTTPError {
+            return
+        }
+        if target.jiraIssueType.compare("Epic", options: .caseInsensitive) == .orderedSame {
+            rewriteError = "\(key.value) is an epic"
+            return
+        }
+        showLive(target)
+        material = liveMaterial()
+        let id = UUID().uuidString
+        draftId = id
+        draft = Draft(
+            id: id,
+            ticketType: .story,
+            title: "",
+            shortLabel: "",
+            description: "",
+            openQuestions: [],
+            key: key
+        )
+        try persistDraft()
+        try persistMaterial()
+    }
+
+    private func showLive(_ target: RewriteTarget) {
+        fetched = target
+        let comments = Array(target.comments.prefix(50))
+        rewrite = Rewrite(
+            liveTitle: target.title,
+            liveDescription: target.description,
+            comments: comments,
+            commentsTruncated: target.comments.count > 50,
+            watchersNote: "Watchers of \(target.key.value) are emailed",
+            stale: false
+        )
+    }
+
+    private func replaceLiveMaterial() {
+        let live = liveMaterial()
+        material.removeAll {
+            $0.filename == "live-description.md" || $0.filename == "comments.md"
+        }
+        material.insert(contentsOf: live, at: 0)
+    }
+
+    private func liveMaterial() -> [Material] {
+        guard let rewrite else { return [] }
+        var items = [
+            Material(
+                filename: "live-description.md",
+                mimeType: "text/plain",
+                data: Data(rewrite.liveDescription.utf8)
+            )
+        ]
+        if !rewrite.comments.isEmpty {
+            items.append(
+                Material(
+                    filename: "comments.md",
+                    mimeType: "text/plain",
+                    data: Data(rewrite.comments.joined(separator: "\n").utf8)
+                )
+            )
+        }
+        return items
+    }
+
+    private func keepLiveTitle() {
+        guard var draft, let rewrite else { return }
+        draft.title = rewrite.liveTitle
+        self.draft = draft
+    }
+
+    private func workOnDuplicate() async throws {
+        switch duplicateInterrupt {
+        case .catalog(let key, _, _):
+            duplicateInterrupt = nil
+            try await pasteKey(key.value)
+        case .localDraft(let id, _, _):
+            guard let folder = draftsRoot()?.appending(component: id),
+                let stored = try storedDraft(in: folder)
+            else { return }
+            draft = stored.draft
+            draftId = stored.draft.id
+            failedUploads = stored.failedUploads
+            blockedUploads = []
+            material = try loadMaterial()
+            try refreshMatches()
+            duplicateInterrupt = nil
+        case nil:
+            return
+        }
     }
 
     private func reviseDraft(
@@ -577,7 +802,8 @@ public actor Session {
             title: generated.title,
             shortLabel: generated.shortLabel,
             description: description,
-            openQuestions: generated.openQuestions
+            openQuestions: generated.openQuestions,
+            key: draft?.key
         )
         try persistDraft()
         try persistMaterial()
@@ -677,6 +903,8 @@ public actor Session {
             draftId = stored.draft.id
             material = try loadMaterial()
             failedUploads = stored.failedUploads
+            rewrite = stored.rewrite
+            fetched = stored.fetched
             return
         }
         try loadPendingMaterial()
@@ -742,17 +970,20 @@ public actor Session {
             options: [.skipsHiddenFiles]
         )
 
+        var rewriting: StoredDraft?
+        var create: StoredDraft?
         var queue: StoredDraft?
         for folder in folders {
             guard let stored = try storedDraft(in: folder) else { continue }
-            if stored.draft.key == nil {
-                return stored
-            }
-            if queue == nil {
+            if stored.rewrite != nil {
+                if rewriting == nil { rewriting = stored }
+            } else if stored.draft.key == nil {
+                if create == nil { create = stored }
+            } else if queue == nil {
                 queue = stored
             }
         }
-        return queue
+        return rewriting ?? create ?? queue
     }
 
     private func localCreateDrafts() throws -> [Draft] {
@@ -792,7 +1023,9 @@ public actor Session {
                 openQuestions: sidecar.openQuestions,
                 key: sidecar.key.map(TicketKey.init)
             ),
-            failedUploads: sidecar.failedUploads
+            failedUploads: sidecar.failedUploads,
+            rewrite: sidecar.rewrite,
+            fetched: sidecar.fetched
         )
     }
 
@@ -874,7 +1107,9 @@ public actor Session {
             shortLabel: draft.shortLabel,
             openQuestions: draft.openQuestions,
             key: draft.key?.value,
-            failedUploads: failedUploads
+            failedUploads: failedUploads,
+            rewrite: rewrite,
+            fetched: fetched
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -917,6 +1152,8 @@ public actor Session {
     private struct StoredDraft {
         var draft: Draft
         var failedUploads: [String]
+        var rewrite: Rewrite?
+        var fetched: RewriteTarget?
     }
 
     private struct MaterialRecord: Codable {
@@ -950,9 +1187,12 @@ public actor Session {
         var openQuestions: [String]
         var key: String?
         var failedUploads: [String]
+        var rewrite: Rewrite?
+        var fetched: RewriteTarget?
 
         enum CodingKeys: String, CodingKey {
             case ticketType, title, shortLabel, openQuestions, key, failedUploads
+            case rewrite, fetched
         }
 
         init(
@@ -961,7 +1201,9 @@ public actor Session {
             shortLabel: String,
             openQuestions: [String],
             key: String?,
-            failedUploads: [String]
+            failedUploads: [String],
+            rewrite: Rewrite?,
+            fetched: RewriteTarget?
         ) {
             self.ticketType = ticketType
             self.title = title
@@ -969,6 +1211,8 @@ public actor Session {
             self.openQuestions = openQuestions
             self.key = key
             self.failedUploads = failedUploads
+            self.rewrite = rewrite
+            self.fetched = fetched
         }
 
         init(from decoder: Decoder) throws {
@@ -979,6 +1223,8 @@ public actor Session {
             openQuestions = try container.decode([String].self, forKey: .openQuestions)
             key = try container.decodeIfPresent(String.self, forKey: .key)
             failedUploads = try container.decodeIfPresent([String].self, forKey: .failedUploads) ?? []
+            rewrite = try container.decodeIfPresent(Rewrite.self, forKey: .rewrite)
+            fetched = try container.decodeIfPresent(RewriteTarget.self, forKey: .fetched)
         }
     }
 
@@ -1015,7 +1261,9 @@ public actor Session {
             structuralWarnings: draft.map(structuralWarnings(for:)) ?? [],
             duplicateInterrupt: duplicateInterrupt,
             related: related,
-            status: status
+            status: status,
+            rewrite: rewrite,
+            rewriteError: rewriteError
         )
     }
 }
@@ -1202,6 +1450,12 @@ private let draftJSONInstruction = """
 private let generateInstruction = """
     \(draftJSONInstruction)
     Infer ticketType from the brain-dump. Default story if ambiguous. Do not ask ticket type as a question.
+    """
+
+private let rewriteGenerateInstruction = """
+    \(draftJSONInstruction)
+    Infer ticketType from the Material. Default story if ambiguous. Do not ask ticket type as a question.
+    Reshape against the template from this Material. Never invent Scope.
     """
 
 private let sendInstruction = """

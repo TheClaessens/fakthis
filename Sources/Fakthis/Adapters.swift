@@ -84,7 +84,7 @@ public struct JiraIssueType: Equatable, Sendable {
     public var isStandard: Bool { !subtask && hierarchyLevel == 0 }
 }
 
-public struct RewriteTarget: Equatable, Sendable {
+public struct RewriteTarget: Equatable, Sendable, Codable {
     public var key: TicketKey
     public var title: String
     public var description: String
