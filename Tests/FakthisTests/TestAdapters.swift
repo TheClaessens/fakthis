@@ -10,7 +10,7 @@ struct ModelCompleteRequest: Equatable, Sendable {
 actor FakeTranscriber: Transcriber {
     private var compileFinished: Bool
     private var takes: [String] = []
-    private(set) var transcribeTerms: [[String]] = []
+    private(set) var boostLists: [[String]] = []
     private var holdTranscribe = false
     private var transcribeWaiters: [CheckedContinuation<Void, Never>] = []
     private var failTranscribe = false
@@ -43,8 +43,8 @@ actor FakeTranscriber: Transcriber {
         compileFinished ? .done : .inProgress
     }
 
-    func transcribe(terms: [String]) async throws -> String {
-        transcribeTerms.append(terms)
+    func transcribe(boostList: [String]) async throws -> String {
+        boostLists.append(boostList)
         if failTranscribe { throw TranscribeFailed() }
         if holdTranscribe {
             await withCheckedContinuation { transcribeWaiters.append($0) }
@@ -149,6 +149,14 @@ struct CreatedTicket: Equatable, Sendable {
     var descriptionWiki: String
     var jiraIssueType: String
     var completenessMarker: CompletenessMarker
+    var parentKey: TicketKey?
+}
+
+struct UpdatedTicket: Equatable, Sendable {
+    var key: TicketKey
+    var title: String
+    var descriptionWiki: String
+    var completenessMarker: CompletenessMarker
 }
 
 struct SeededEpic: Sendable {
@@ -168,14 +176,18 @@ struct SeededIssue: Sendable {
     var created: Date
     var body: String
     var comments: [String]
+    var updated: Date?
 }
 
 actor FakeJira: Jira {
     var unreachable = false
     var failUploads = false
+    var failOnCreate: Int?
     var nextKey = TicketKey("FAK-1")
     private(set) var created: [CreatedTicket] = []
+    private(set) var updated: [UpdatedTicket] = []
     private(set) var catalogPulls: [String] = []
+    private(set) var fetchRewriteCalls: [TicketKey] = []
     private(set) var uploaded: [UploadedAttachment] = []
     private(set) var attachmentPolicyCalls = 0
     var uploadAttachmentCalls: Int { uploaded.count }
@@ -198,15 +210,23 @@ actor FakeJira: Jira {
     ) async throws -> TicketKey
     {
         if unreachable { throw JiraUnreachable() }
+        if let failOnCreate, created.count + 1 == failOnCreate {
+            throw JiraUnreachable()
+        }
         created.append(
             CreatedTicket(
                 title: title,
                 descriptionWiki: descriptionWiki,
                 jiraIssueType: jiraIssueType,
-                completenessMarker: completenessMarker
+                completenessMarker: completenessMarker,
+                parentKey: parentKey
             )
         )
-        return nextKey
+        let key = nextKey
+        if let number = Int(key.value.split(separator: "-").last ?? "") {
+            nextKey = TicketKey("FAK-\(number + 1)")
+        }
+        return key
     }
 
     func updateTicket(
@@ -216,6 +236,14 @@ actor FakeJira: Jira {
         completenessMarker: CompletenessMarker
     ) async throws {
         if unreachable { throw JiraUnreachable() }
+        updated.append(
+            UpdatedTicket(
+                key: key,
+                title: title,
+                descriptionWiki: descriptionWiki,
+                completenessMarker: completenessMarker
+            )
+        )
     }
 
     func attachmentPolicy() async throws -> AttachmentPolicy {
@@ -243,14 +271,18 @@ actor FakeJira: Jira {
     }
 
     func fetchRewriteTarget(key: TicketKey) async throws -> RewriteTarget {
+        fetchRewriteCalls.append(key)
         if unreachable { throw JiraUnreachable() }
+        guard let issue = seededIssues.first(where: { $0.key == key.value }) else {
+            throw JiraHTTPError(statusCode: 404)
+        }
         return RewriteTarget(
             key: key,
-            title: "",
-            description: "",
-            comments: [],
-            updated: Date(timeIntervalSince1970: 0),
-            jiraIssueType: ""
+            title: issue.title,
+            description: issue.body,
+            comments: issue.comments,
+            updated: issue.updated ?? issue.created,
+            jiraIssueType: issue.jiraIssueType
         )
     }
 
@@ -299,6 +331,20 @@ actor FakeJira: Jira {
         seededIssueTypes = types
     }
 
+    func replaceIssue(
+        key: String,
+        title: String,
+        body: String,
+        comments: [String],
+        updated: Date
+    ) {
+        guard let index = seededIssues.firstIndex(where: { $0.key == key }) else { return }
+        seededIssues[index].title = title
+        seededIssues[index].body = body
+        seededIssues[index].comments = comments
+        seededIssues[index].updated = updated
+    }
+
     func setAttachmentPolicy(_ policy: AttachmentPolicy) {
         self.policy = policy
     }
@@ -313,6 +359,10 @@ actor FakeJira: Jira {
 
     func setFailUploads(_ value: Bool) {
         failUploads = value
+    }
+
+    func setFailOnCreate(_ value: Int?) {
+        failOnCreate = value
     }
 
     func setUnreachable(_ value: Bool) {

@@ -20,6 +20,22 @@ public actor Session {
         case tickRelated(TicketKey)
         case startListening
         case stopListening
+        case pasteKey(String)
+        case update
+        case keepLiveTitle
+        case refetch
+        case clobber
+        case nameBatch(name: String, shortLabels: [String])
+        case dismissRegenerateOffer
+        case focusDraft(String)
+        case addDraft(shortLabel: String)
+        case removeDraft(String)
+        case renameSibling(id: String, shortLabel: String)
+        case setDefaultEpic(TicketKey?)
+        case overrideEpic(id: String, TicketKey?)
+        case setBlocks([String])
+        case clearBlocks
+        case assignMedia(filename: String, draftIds: [String])
     }
 
     public enum Status: Equatable, Sendable {
@@ -45,6 +61,9 @@ public actor Session {
         public var duplicateInterrupt: DuplicateHit?
         public var related: [RelatedHit]
         public var status: Status
+        public var rewrite: Rewrite?
+        public var rewriteError: String?
+        public var batch: Batch?
     }
 
     private var project: Project?
@@ -69,6 +88,14 @@ public actor Session {
     private var duplicateInterrupt: DuplicateHit?
     private var related: [RelatedHit] = []
     private var status: Status = .yourTurn
+    private var rewrite: Rewrite?
+    private var rewriteError: String?
+    private var fetched: RewriteTarget?
+    private var batch: Batch?
+    private var brainDump = ""
+    private var namingTurn = ""
+    private var fieldByDraft: [String: String] = [:]
+    private var writtenBlocksLinks: Set<String> = []
 
     public init(
         applicationSupport: URL,
@@ -130,17 +157,64 @@ public actor Session {
             try await confirmProject(mapping: mapping)
         case .dismissDuplicate:
             duplicateInterrupt = nil
+            batch?.duplicates = []
         case .workOnDuplicate:
-            try workOnDuplicate()
+            try await workOnDuplicate()
         case .tickRelated(let key):
             tickRelated(key)
         case .startListening:
             startBackgroundRefreshIfStale()
-            startListening()
+            await startListening()
         case .stopListening:
             startBackgroundRefreshIfStale()
             try await stopListening()
+        case .pasteKey(let key):
+            startBackgroundRefreshIfStale()
+            try await pasteKey(key)
+        case .update:
+            startBackgroundRefreshIfStale()
+            try await update()
+        case .keepLiveTitle:
+            keepLiveTitle()
+        case .refetch:
+            startBackgroundRefreshIfStale()
+            try await refetch()
+        case .clobber:
+            startBackgroundRefreshIfStale()
+            try await clobber()
+        case .nameBatch(let name, let shortLabels):
+            startBackgroundRefreshIfStale()
+            try nameBatch(name: name, shortLabels: shortLabels)
+        case .dismissRegenerateOffer:
+            batch?.offerRegenerateDraft1 = false
+        case .focusDraft(let id):
+            startBackgroundRefreshIfStale()
+            try focusDraft(id)
+        case .addDraft(let shortLabel):
+            startBackgroundRefreshIfStale()
+            try addDraft(shortLabel: shortLabel)
+        case .removeDraft(let id):
+            startBackgroundRefreshIfStale()
+            try removeDraft(id)
+        case .renameSibling(let id, let shortLabel):
+            startBackgroundRefreshIfStale()
+            try renameSibling(id: id, shortLabel: shortLabel)
+        case .setDefaultEpic(let key):
+            startBackgroundRefreshIfStale()
+            setDefaultEpic(key)
+        case .overrideEpic(let id, let key):
+            startBackgroundRefreshIfStale()
+            overrideEpic(id: id, key: key)
+        case .setBlocks(let order):
+            startBackgroundRefreshIfStale()
+            setBlocks(order)
+        case .clearBlocks:
+            batch?.blocks = []
+        case .assignMedia(let filename, let draftIds):
+            startBackgroundRefreshIfStale()
+            try assignMedia(filename: filename, draftIds: draftIds)
         }
+        try persistBatchIfNeeded()
         return snapshot()
     }
 
@@ -210,6 +284,11 @@ public actor Session {
     }
 
     private func submit() async throws {
+        if batch != nil {
+            try refreshMatches()
+            try await submitBatch()
+            return
+        }
         guard var draft, draft.key == nil,
             let project,
             let jiraIssueType = project.ticketTypeMapping[draft.ticketType]
@@ -247,6 +326,110 @@ public actor Session {
         if !failedUploads.isEmpty {
             try persistDraft()
         }
+    }
+
+    private func submitBatch() async throws {
+        guard var batch, let project else { return }
+        try persistDraft()
+        try persistMaterial()
+        let order = batch.blocks.isEmpty ? batch.siblings.map(\.id) : batch.blocks
+        let linking = !batch.blocks.isEmpty
+        var previousKey: TicketKey?
+        for id in order {
+            guard let siblingIndex = batch.siblings.firstIndex(where: { $0.id == id }) else {
+                continue
+            }
+            if let existing = batch.siblings[siblingIndex].key {
+                if linking {
+                    do {
+                        try await writeBlocksLink(from: previousKey, to: existing)
+                    } catch is JiraUnreachable {
+                        self.batch = batch
+                        return
+                    }
+                }
+                try loadSibling(id)
+                if draft?.id == id, draft?.key != nil {
+                    await uploadPending(key: existing)
+                    if !failedUploads.isEmpty {
+                        try persistDraft()
+                    }
+                }
+                previousKey = existing
+                continue
+            }
+            try loadSibling(id)
+            guard var draft, draft.key == nil, !draft.title.isEmpty,
+                let jiraIssueType = project.ticketTypeMapping[draft.ticketType]
+            else { continue }
+            let parent = batch.siblings[siblingIndex].epicKey ?? batch.defaultEpicKey
+            let key: TicketKey
+            do {
+                key = try await jira.createTicket(
+                    projectKey: project.key,
+                    title: draft.title,
+                    descriptionWiki: wikiMarkup(from: draft.descriptionWithOpenQuestions),
+                    jiraIssueType: jiraIssueType,
+                    parentKey: parent,
+                    completenessMarker: draft.openQuestions.isEmpty ? .clear : .apply
+                )
+            } catch is JiraUnreachable {
+                self.batch = batch
+                return
+            }
+            draft.key = key
+            self.draft = draft
+            batch.siblings[siblingIndex].key = key
+            batch.siblings[siblingIndex].shortLabel = draft.shortLabel
+            batch.siblings[siblingIndex].ticketType = draft.ticketType
+            batch.siblings[siblingIndex].openQuestions = draft.openQuestions
+            self.batch = batch
+            catalog.rows.append(
+                CatalogRow(
+                    key: key,
+                    title: draft.title,
+                    jiraIssueType: jiraIssueType,
+                    shortLabel: draft.shortLabel,
+                    ticketType: draft.ticketType
+                )
+            )
+            try persistDraft()
+            try persistCatalog()
+            if linking {
+                do {
+                    try await writeBlocksLink(from: previousKey, to: key)
+                } catch is JiraUnreachable {
+                    return
+                }
+            }
+            previousKey = key
+            await uploadPending(key: key)
+            if !failedUploads.isEmpty {
+                try persistDraft()
+            }
+        }
+        try finishBatchIfSubmitted(batch)
+    }
+
+    private func writeBlocksLink(from previousKey: TicketKey?, to key: TicketKey) async throws {
+        guard let previousKey else { return }
+        let id = "\(previousKey.value)>\(key.value)"
+        if writtenBlocksLinks.contains(id) { return }
+        try await jira.createBlocksLink(blocker: previousKey, blocked: key)
+        writtenBlocksLinks.insert(id)
+    }
+
+    private func finishBatchIfSubmitted(_ batch: Batch) throws {
+        let allKeyed = batch.siblings.allSatisfy { $0.key != nil }
+        guard allKeyed else { return }
+        let anyFolder = batch.siblings.contains { sibling in
+            guard let folder = draftsRoot()?.appending(component: sibling.id) else { return false }
+            return FileManager.default.fileExists(atPath: folder.path)
+        }
+        guard !anyFolder else { return }
+        try deleteBatchFile()
+        self.batch = nil
+        writtenBlocksLinks = []
     }
 
     private func uploadPending(key: TicketKey) async {
@@ -407,9 +590,17 @@ public actor Session {
         try persistMaterial()
     }
 
-    private func startListening() {
+    private func startListening() async {
         guard project != nil, !aneCompileInProgress, status != .listening else { return }
         status = .listening
+        await transcriber.beginTake()
+    }
+
+    private func transcriberBoostList() -> [String] {
+        Array(
+            ((project?.terms ?? []) + catalog.epics.map(\.name) + catalog.componentNames)
+                .prefix(TranscriberBoost.cap)
+        )
     }
 
     private func stopListening() async throws {
@@ -417,14 +608,18 @@ public actor Session {
         status = .transcribing
         defer { status = .yourTurn }
         do {
-            commitTake(try await transcriber.transcribe(terms: project?.terms ?? []))
+            commitTake(try await transcriber.transcribe(boostList: transcriberBoostList()))
         } catch is TranscribeFailed {
             return
         }
     }
 
     private func commitTake(_ take: String) {
-        if let draft, draft.key == nil {
+        if rewrite != nil {
+            field = take
+            return
+        }
+        if let draft, draft.key == nil, !draft.title.isEmpty || !draft.description.isEmpty {
             field = take
             return
         }
@@ -432,24 +627,158 @@ public actor Session {
         field = trimmed.isEmpty ? take : trimmed + " " + take
     }
 
+    private var isUploadQueue: Bool {
+        draft?.key != nil && rewrite == nil
+    }
+
+    private func update() async throws {
+        guard let live = try await liveForWrite() else { return }
+        if let fetched, live.updated > fetched.updated {
+            var rewrite = rewrite
+            rewrite?.stale = true
+            self.rewrite = rewrite
+            return
+        }
+        try await putRewrite(live)
+    }
+
+    private func clobber() async throws {
+        guard let live = try await liveForWrite() else { return }
+        try await putRewrite(live)
+    }
+
+    private func liveForWrite() async throws -> RewriteTarget? {
+        guard let key = draft?.key, rewrite != nil else { return nil }
+        do {
+            return try await jira.fetchRewriteTarget(key: key)
+        } catch is JiraUnreachable {
+            return nil
+        } catch is JiraHTTPError {
+            return nil
+        }
+    }
+
+    private func putRewrite(_ live: RewriteTarget) async throws {
+        guard let draft, let key = draft.key else { return }
+        do {
+            try await jira.updateTicket(
+                key: key,
+                title: draft.title,
+                descriptionWiki: wikiMarkup(from: draft.descriptionWithOpenQuestions),
+                completenessMarker: draft.openQuestions.isEmpty ? .clear : .apply
+            )
+        } catch is JiraUnreachable {
+            return
+        }
+        fetched = live
+        rewrite = nil
+        upsertCatalogRow(for: draft, key: key, jiraIssueType: live.jiraIssueType)
+        try persistDraft()
+        try persistCatalog()
+        await uploadPending(key: key)
+        if !failedUploads.isEmpty {
+            try persistDraft()
+        }
+    }
+
+    private func upsertCatalogRow(for draft: Draft, key: TicketKey, jiraIssueType: String) {
+        if let index = catalog.rows.firstIndex(where: { $0.key == key }) {
+            catalog.rows[index].title = draft.title
+            catalog.rows[index].shortLabel = draft.shortLabel
+            catalog.rows[index].ticketType = draft.ticketType
+            return
+        }
+        catalog.rows.append(
+            CatalogRow(
+                key: key,
+                title: draft.title,
+                jiraIssueType: jiraIssueType,
+                shortLabel: draft.shortLabel,
+                ticketType: draft.ticketType
+            )
+        )
+    }
+
+    private func refetch() async throws {
+        guard let key = draft?.key, rewrite != nil else { return }
+        let target: RewriteTarget
+        do {
+            target = try await jira.fetchRewriteTarget(key: key)
+        } catch is JiraUnreachable {
+            return
+        } catch is JiraHTTPError {
+            return
+        }
+        showLive(target)
+        replaceLiveMaterial()
+        try persistDraft()
+        try persistMaterial()
+    }
+
     private func generate() async throws {
-        if draft?.key != nil { return }
+        if isUploadQueue { return }
         guard project != nil else { return }
+        if rewrite == nil, brainDump.isEmpty {
+            brainDump = field
+        }
         try await reviseDraft(
             user: generateUserMessage(),
-            instruction: generateInstruction,
+            instruction: rewrite == nil ? generateInstruction : rewriteInstruction(),
             screenshots: material.filter(\.isScreenshot)
         )
     }
 
+    private func rewriteInstruction() -> String {
+        guard let jiraType = fetched?.jiraIssueType,
+            let mapping = project?.ticketTypeMapping
+        else { return rewriteGenerateInstruction }
+        let matches = mapping.filter { $0.value == jiraType }
+        guard matches.count == 1, let ticketType = matches.first?.key else {
+            return rewriteGenerateInstruction
+        }
+        return """
+            \(rewriteGenerateInstruction)
+            Jira issue type \(jiraType) maps 1:1 to \(ticketType.rawValue).
+            """
+    }
+
     private func generateUserMessage() -> String {
-        let blocks = textMaterialBlocks() + relatedContextBlocks()
-        guard !blocks.isEmpty else { return field }
-        return ([field] + blocks).joined(separator: "\n\n")
+        let blocks = textMaterialBlocks() + relatedContextBlocks() + batchContextBlocks()
+        let user: String
+        if let draft, draft.title.isEmpty, draft.description.isEmpty, !brainDump.isEmpty {
+            var parts = [brainDump]
+            if !namingTurn.isEmpty, namingTurn != brainDump {
+                parts.append(namingTurn)
+            }
+            user = parts.joined(separator: "\n\n")
+        } else {
+            user = field
+        }
+        guard !blocks.isEmpty else { return user }
+        return ([user] + blocks).joined(separator: "\n\n")
+    }
+
+    private func batchContextBlocks() -> [String] {
+        guard let batch,
+            let index = batch.siblings.firstIndex(where: { $0.id == batch.focusedDraftId })
+        else { return [] }
+        let list = batch.siblings.enumerated().map { position, sibling in
+            if let ticketType = sibling.ticketType {
+                return "\(position + 1). \(sibling.shortLabel) (\(ticketType.rawValue))"
+            }
+            return "\(position + 1). \(sibling.shortLabel)"
+        }.joined(separator: "\n")
+        return [
+            """
+            You are Draft \(index + 1) of \(batch.siblings.count). Write this one.
+            Siblings:
+            \(list)
+            """
+        ]
     }
 
     private func send() async throws {
-        guard let draft, draft.key == nil, project != nil else { return }
+        guard let draft, !isUploadQueue, project != nil else { return }
         try await reviseDraft(
             user: draftAndAnswerMessage(draft),
             instruction: sendInstruction,
@@ -458,7 +787,7 @@ public actor Session {
     }
 
     private func changeTicketType(_ ticketType: TicketType) async throws {
-        guard let draft, draft.key == nil, project != nil else { return }
+        guard let draft, !isUploadQueue, project != nil else { return }
         try await reviseDraft(
             user: reshapeUserMessage(draft),
             instruction: reshapeInstruction(ticketType),
@@ -474,13 +803,14 @@ public actor Session {
 
             \(currentDraftBlock(draft))
             """
-        let context = relatedContextBlocks()
-        guard !context.isEmpty else { return base }
-        return ([base] + context).joined(separator: "\n\n")
+        let extra = relatedContextBlocks() + batchContextBlocks()
+        guard !extra.isEmpty else { return base }
+        return ([base] + extra).joined(separator: "\n\n")
     }
 
     private func reshapeUserMessage(_ draft: Draft) -> String {
-        ([currentDraftBlock(draft), field] + textMaterialBlocks() + relatedContextBlocks())
+        ([currentDraftBlock(draft), field] + textMaterialBlocks() + relatedContextBlocks()
+            + batchContextBlocks())
             .joined(separator: "\n\n")
     }
 
@@ -496,9 +826,43 @@ public actor Session {
     }
 
     private func textMaterialBlocks() -> [String] {
-        material.filter(\.isText).map { item in
+        textMaterialForGenerate().map { item in
             let body = String(data: item.data, encoding: .utf8) ?? ""
             return "\(item.filename)\n\(body)"
+        }
+    }
+
+    private func textMaterialForGenerate() -> [Material] {
+        var seen = Set<String>()
+        var items: [Material] = []
+        func add(_ item: Material) {
+            guard item.isText, seen.insert(item.filename).inserted else { return }
+            items.append(item)
+        }
+        if let batch {
+            for sibling in batch.siblings {
+                for item in materialOnDisk(draftId: sibling.id) { add(item) }
+            }
+        }
+        for item in material { add(item) }
+        return items
+    }
+
+    private func materialOnDisk(draftId: String) -> [Material] {
+        guard let folder = draftsRoot()?.appending(component: draftId)
+            .appending(component: "material")
+        else { return [] }
+        let indexURL = folder.appending(component: "index.json")
+        guard FileManager.default.fileExists(atPath: indexURL.path),
+            let records = try? JSONDecoder().decode(
+                [MaterialRecord].self,
+                from: Data(contentsOf: indexURL)
+            )
+        else { return [] }
+        return records.compactMap { record in
+            let url = folder.appending(component: record.filename)
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return Material(filename: record.filename, mimeType: record.mimeType, data: data)
         }
     }
 
@@ -513,8 +877,160 @@ public actor Session {
         related[index].ticked.toggle()
     }
 
-    private func workOnDuplicate() throws {
-        guard case .localDraft(let id, _, _)? = duplicateInterrupt else { return }
+    private func pasteKey(_ raw: String) async throws {
+        guard let project else { return }
+        rewriteError = nil
+        let key = TicketKey(raw)
+        if !key.value.hasPrefix("\(project.key)-") {
+            rewriteError = "\(key.value) is not in this Project"
+            return
+        }
+        let target: RewriteTarget
+        do {
+            target = try await jira.fetchRewriteTarget(key: key)
+        } catch is JiraUnreachable {
+            return
+        } catch let error as JiraHTTPError where error.statusCode == 404 {
+            rewriteError = "\(key.value) was not found"
+            return
+        } catch is JiraHTTPError {
+            return
+        }
+        if target.jiraIssueType.compare("Epic", options: .caseInsensitive) == .orderedSame {
+            rewriteError = "\(key.value) is an epic"
+            return
+        }
+        showLive(target)
+        material = liveMaterial()
+        let id = UUID().uuidString
+        draftId = id
+        draft = Draft(
+            id: id,
+            ticketType: .story,
+            title: "",
+            shortLabel: "",
+            description: "",
+            openQuestions: [],
+            key: key
+        )
+        try persistDraft()
+        try persistMaterial()
+    }
+
+    private func showLive(_ target: RewriteTarget) {
+        fetched = target
+        let comments = Array(target.comments.prefix(50))
+        rewrite = Rewrite(
+            liveTitle: target.title,
+            liveDescription: target.description,
+            comments: comments,
+            commentsTruncated: target.comments.count > 50,
+            watchersNote: "Watchers of \(target.key.value) are emailed",
+            stale: false
+        )
+    }
+
+    private func replaceLiveMaterial() {
+        let live = liveMaterial()
+        material.removeAll {
+            $0.filename == "live-description.md" || $0.filename == "comments.md"
+        }
+        material.insert(contentsOf: live, at: 0)
+    }
+
+    private func liveMaterial() -> [Material] {
+        guard let rewrite else { return [] }
+        var items = [
+            Material(
+                filename: "live-description.md",
+                mimeType: "text/plain",
+                data: Data(rewrite.liveDescription.utf8)
+            )
+        ]
+        if !rewrite.comments.isEmpty {
+            items.append(
+                Material(
+                    filename: "comments.md",
+                    mimeType: "text/plain",
+                    data: Data(rewrite.comments.joined(separator: "\n").utf8)
+                )
+            )
+        }
+        return items
+    }
+
+    private func keepLiveTitle() {
+        guard var draft, let rewrite else { return }
+        draft.title = rewrite.liveTitle
+        self.draft = draft
+    }
+
+    private func focusDraft(_ id: String) throws {
+        guard var batch, batch.siblings.contains(where: { $0.id == id }) else { return }
+        try persistDraft()
+        try persistMaterial()
+        if let current = draftId {
+            fieldByDraft[current] = field
+        }
+        batch.focusedDraftId = id
+        self.batch = batch
+        try loadSibling(id)
+        field = fieldByDraft[id] ?? ""
+    }
+
+    private func addDraft(shortLabel: String) throws {
+        guard var batch, project != nil, rewrite == nil else { return }
+        let focused = draft
+        let focusedId = draftId
+        let id = UUID().uuidString
+        draft = Draft(
+            id: id,
+            ticketType: .story,
+            title: "",
+            shortLabel: shortLabel,
+            description: "",
+            openQuestions: []
+        )
+        draftId = id
+        try persistDraft()
+        batch.siblings.append(BatchSibling(id: id, shortLabel: shortLabel))
+        if !batch.blocks.isEmpty {
+            batch.blocks.append(id)
+        }
+        draft = focused
+        draftId = focusedId
+        self.batch = batch
+    }
+
+    private func removeDraft(_ id: String) throws {
+        guard var batch, batch.siblings.contains(where: { $0.id == id }) else { return }
+        let remaining = batch.siblings.filter { $0.id != id }
+        if let folder = draftsRoot()?.appending(component: id),
+            FileManager.default.fileExists(atPath: folder.path)
+        {
+            try FileManager.default.removeItem(at: folder)
+        }
+        fieldByDraft[id] = nil
+        if remaining.count < 2 {
+            try deleteBatchFile()
+            self.batch = nil
+            if let keep = remaining.first {
+                try loadSibling(keep.id)
+            }
+            return
+        }
+        batch.siblings = remaining
+        batch.blocks.removeAll { $0 == id }
+        if draftId == id, let keep = remaining.first {
+            batch.focusedDraftId = keep.id
+            self.batch = batch
+            try loadSibling(keep.id)
+            return
+        }
+        self.batch = batch
+    }
+
+    private func loadSibling(_ id: String) throws {
         guard let folder = draftsRoot()?.appending(component: id),
             let stored = try storedDraft(in: folder)
         else { return }
@@ -523,8 +1039,184 @@ public actor Session {
         failedUploads = stored.failedUploads
         blockedUploads = []
         material = try loadMaterial()
-        try refreshMatches()
-        duplicateInterrupt = nil
+        field = fieldByDraft[id] ?? field
+    }
+
+    private func renameSibling(id: String, shortLabel: String) throws {
+        guard var batch, let index = batch.siblings.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        batch.siblings[index].shortLabel = shortLabel
+        self.batch = batch
+        if draft?.id == id {
+            draft?.shortLabel = shortLabel
+            try persistDraft()
+        }
+    }
+
+    private func setDefaultEpic(_ key: TicketKey?) {
+        guard var batch else { return }
+        if let key, !catalog.epics.contains(where: { $0.key == key }) {
+            return
+        }
+        batch.defaultEpicKey = key
+        self.batch = batch
+    }
+
+    private func overrideEpic(id: String, key: TicketKey?) {
+        guard var batch, let index = batch.siblings.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        if let key, !catalog.epics.contains(where: { $0.key == key }) {
+            return
+        }
+        batch.siblings[index].epicKey = key
+        self.batch = batch
+    }
+
+    private func setBlocks(_ order: [String]) {
+        guard var batch else { return }
+        let siblingIds = Set(batch.siblings.map(\.id))
+        guard Set(order) == siblingIds else { return }
+        batch.blocks = order
+        self.batch = batch
+    }
+
+    private func assignMedia(filename: String, draftIds: [String]) throws {
+        guard let batch else { return }
+        let allowed = Set(batch.siblings.map(\.id))
+        let targets = draftIds.filter { allowed.contains($0) }
+        guard let item = findMaterial(filename) else { return }
+        try persistMaterial()
+        for id in targets {
+            try writeMaterial(item, toDraft: id)
+        }
+        if let focused = draftId, targets.contains(focused),
+            !material.contains(where: { $0.filename == filename })
+        {
+            material.append(item)
+        }
+    }
+
+    private func findMaterial(_ filename: String) -> Material? {
+        if let item = material.first(where: { $0.filename == filename }) { return item }
+        guard let batch else { return nil }
+        for sibling in batch.siblings {
+            if let item = materialOnDisk(draftId: sibling.id).first(where: { $0.filename == filename })
+            {
+                return item
+            }
+        }
+        return nil
+    }
+
+    private func writeMaterial(_ item: Material, toDraft id: String) throws {
+        guard let folder = draftsRoot()?.appending(component: id) else { return }
+        let materialFolder = folder.appending(component: "material")
+        try FileManager.default.createDirectory(
+            at: materialFolder,
+            withIntermediateDirectories: true
+        )
+        try item.data.write(to: materialFolder.appending(component: item.filename))
+        var records = materialOnDisk(draftId: id).map {
+            MaterialRecord(
+                filename: $0.filename,
+                mimeType: $0.mimeType,
+                blockedFromUpload: blockedUploads.contains($0.filename)
+            )
+        }
+        if !records.contains(where: { $0.filename == item.filename }) {
+            records.append(
+                MaterialRecord(
+                    filename: item.filename,
+                    mimeType: item.mimeType,
+                    blockedFromUpload: blockedUploads.contains(item.filename)
+                )
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(records).write(to: materialFolder.appending(component: "index.json"))
+    }
+
+    private func nameBatch(name: String, shortLabels: [String]) throws {
+        guard project != nil, rewrite == nil, draft?.key == nil, batch == nil, shortLabels.count >= 2
+        else {
+            return
+        }
+        let converting = draft.map { !$0.title.isEmpty || !$0.description.isEmpty } ?? false
+        if converting {
+            namingTurn = field
+        }
+        let firstId = draft?.id ?? draftId ?? UUID().uuidString
+        var first = draft
+            ?? Draft(
+                id: firstId,
+                ticketType: .story,
+                title: "",
+                shortLabel: shortLabels[0],
+                description: "",
+                openQuestions: []
+            )
+        first.shortLabel = shortLabels[0]
+        draft = first
+        draftId = firstId
+        try persistDraft()
+        try persistMaterial()
+
+        var siblings = [
+            BatchSibling(
+                id: firstId,
+                shortLabel: first.shortLabel,
+                ticketType: converting ? first.ticketType : nil,
+                openQuestions: first.openQuestions
+            )
+        ]
+        for label in shortLabels.dropFirst() {
+            let id = UUID().uuidString
+            draft = Draft(
+                id: id,
+                ticketType: .story,
+                title: "",
+                shortLabel: label,
+                description: "",
+                openQuestions: []
+            )
+            draftId = id
+            try persistDraft()
+            siblings.append(BatchSibling(id: id, shortLabel: label))
+        }
+
+        draft = first
+        draftId = firstId
+        batch = Batch(
+            name: name,
+            siblings: siblings,
+            focusedDraftId: firstId,
+            blocks: siblings.map(\.id),
+            offerRegenerateDraft1: converting
+        )
+    }
+
+    private func workOnDuplicate() async throws {
+        switch duplicateInterrupt {
+        case .catalog(let key, _, _):
+            duplicateInterrupt = nil
+            try await pasteKey(key.value)
+        case .localDraft(let id, _, _):
+            guard let folder = draftsRoot()?.appending(component: id),
+                let stored = try storedDraft(in: folder)
+            else { return }
+            draft = stored.draft
+            draftId = stored.draft.id
+            failedUploads = stored.failedUploads
+            blockedUploads = []
+            material = try loadMaterial()
+            try refreshMatches()
+            duplicateInterrupt = nil
+        case nil:
+            return
+        }
     }
 
     private func reviseDraft(
@@ -578,12 +1270,28 @@ public actor Session {
             title: generated.title,
             shortLabel: generated.shortLabel,
             description: description,
-            openQuestions: generated.openQuestions
+            openQuestions: generated.openQuestions,
+            key: draft?.key
         )
         try persistDraft()
         try persistMaterial()
         try persistTranscript()
+        refreshBatchSiblings()
         try refreshMatches()
+    }
+
+    private func refreshBatchSiblings() {
+        guard var batch, let draft else { return }
+        if let index = batch.siblings.firstIndex(where: { $0.id == draft.id }) {
+            batch.siblings[index].shortLabel = draft.shortLabel
+            batch.siblings[index].ticketType = draft.ticketType
+            batch.siblings[index].key = draft.key
+            batch.siblings[index].openQuestions = draft.openQuestions
+            if index == 0 {
+                batch.offerRegenerateDraft1 = false
+            }
+        }
+        self.batch = batch
     }
 
     private func refreshMatches() throws {
@@ -629,6 +1337,7 @@ public actor Session {
         }
 
         for local in try localCreateDrafts() where local.id != draft.id {
+            if batch?.siblings.contains(where: { $0.id == local.id }) == true { continue }
             let tokens = matchTokens(draft.shortLabel)
             let other = matchTokens(local.shortLabel)
             let intersection = tokens.intersection(other).count
@@ -656,6 +1365,100 @@ public actor Session {
             }
             .prefix(3)
             .map(\.hit)
+        if batch != nil {
+            duplicateInterrupt = nil
+            try refreshBatchDuplicates()
+        }
+    }
+
+    private func refreshBatchDuplicates() throws {
+        guard var batch else { return }
+        let siblingIds = Set(batch.siblings.map(\.id))
+        var hits: [BatchDuplicate] = []
+        for sibling in batch.siblings {
+            let candidate: Draft
+            if sibling.id == draft?.id, let draft {
+                candidate = draft
+            } else if let folder = draftsRoot()?.appending(component: sibling.id),
+                let stored = try storedDraft(in: folder)
+            {
+                candidate = stored.draft
+            } else {
+                continue
+            }
+            guard !candidate.title.isEmpty else { continue }
+            let hit: DuplicateHit?
+            if let catalogHit = catalogDuplicate(for: candidate) {
+                hit = catalogHit
+            } else {
+                hit = try localDuplicate(for: candidate, excluding: siblingIds)
+            }
+            guard let hit else { continue }
+            hits.append(
+                BatchDuplicate(
+                    draftId: candidate.id,
+                    shortLabel: candidate.shortLabel,
+                    hit: hit
+                )
+            )
+        }
+        batch.duplicates = hits
+        self.batch = batch
+    }
+
+    private func catalogDuplicate(for draft: Draft) -> DuplicateHit? {
+        var best: (score: Double, hit: DuplicateHit)?
+        for row in catalog.rows {
+            if row.key == draft.key { continue }
+            let compared = row.shortLabel ?? row.title
+            let against = row.shortLabel != nil ? draft.shortLabel : draft.title
+            let tokens = matchTokens(against)
+            let other = matchTokens(compared)
+            let intersection = tokens.intersection(other).count
+            guard intersection >= 1 else { continue }
+            let score = overlapCoefficient(intersection, min(tokens.count, other.count))
+            let done = row.status.compare("Done", options: .caseInsensitive) == .orderedSame
+            if !done,
+                typeAllowsDuplicate(row, draft: draft),
+                isDuplicateScore(
+                    score,
+                    intersection: intersection,
+                    against: against,
+                    compared: compared
+                )
+            {
+                if let current = best, score <= current.score { continue }
+                best = (
+                    score,
+                    .catalog(key: row.key, shortLabel: row.shortLabel, title: row.title)
+                )
+            }
+        }
+        return best?.hit
+    }
+
+    private func localDuplicate(for draft: Draft, excluding siblingIds: Set<String>) throws -> DuplicateHit? {
+        var best: (score: Double, hit: DuplicateHit)?
+        for local in try localCreateDrafts() where local.id != draft.id && !siblingIds.contains(local.id) {
+            let tokens = matchTokens(draft.shortLabel)
+            let other = matchTokens(local.shortLabel)
+            let intersection = tokens.intersection(other).count
+            let score = overlapCoefficient(intersection, min(tokens.count, other.count))
+            guard local.ticketType == draft.ticketType,
+                isDuplicateScore(
+                    score,
+                    intersection: intersection,
+                    against: draft.shortLabel,
+                    compared: local.shortLabel
+                )
+            else { continue }
+            if let current = best, score <= current.score { continue }
+            best = (
+                score,
+                .localDraft(id: local.id, shortLabel: local.shortLabel, title: local.title)
+            )
+        }
+        return best?.hit
     }
 
     private func typeAllowsDuplicate(_ row: CatalogRow, draft: Draft) -> Bool {
@@ -673,11 +1476,15 @@ public actor Session {
     private func loadDraftIfMissing() throws {
         if draft != nil { return }
         guard project != nil else { return }
+        try loadBatchIfNeeded()
+        if draft != nil { return }
         if let stored = try loadStoredDraft() {
             draft = stored.draft
             draftId = stored.draft.id
             material = try loadMaterial()
             failedUploads = stored.failedUploads
+            rewrite = stored.rewrite
+            fetched = stored.fetched
             return
         }
         try loadPendingMaterial()
@@ -743,17 +1550,20 @@ public actor Session {
             options: [.skipsHiddenFiles]
         )
 
+        var rewriting: StoredDraft?
+        var create: StoredDraft?
         var queue: StoredDraft?
         for folder in folders {
             guard let stored = try storedDraft(in: folder) else { continue }
-            if stored.draft.key == nil {
-                return stored
-            }
-            if queue == nil {
+            if stored.rewrite != nil {
+                if rewriting == nil { rewriting = stored }
+            } else if stored.draft.key == nil {
+                if create == nil { create = stored }
+            } else if queue == nil {
                 queue = stored
             }
         }
-        return queue
+        return rewriting ?? create ?? queue
     }
 
     private func localCreateDrafts() throws -> [Draft] {
@@ -793,7 +1603,9 @@ public actor Session {
                 openQuestions: sidecar.openQuestions,
                 key: sidecar.key.map(TicketKey.init)
             ),
-            failedUploads: sidecar.failedUploads
+            failedUploads: sidecar.failedUploads,
+            rewrite: sidecar.rewrite,
+            fetched: sidecar.fetched
         )
     }
 
@@ -864,6 +1676,96 @@ public actor Session {
         }
     }
 
+    private func persistBatchIfNeeded() throws {
+        guard let batch, let root = projectRoot() else { return }
+        let folder = root.appending(component: "batches")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var epicOverrides: [String: String] = [:]
+        for sibling in batch.siblings {
+            if let epic = sibling.epicKey {
+                epicOverrides[sibling.id] = epic.value
+            }
+        }
+        let file = BatchFile(
+            name: batch.name,
+            draftIds: batch.siblings.map(\.id),
+            focusedDraftId: batch.focusedDraftId,
+            blocks: batch.blocks,
+            defaultEpicKey: batch.defaultEpicKey?.value,
+            epicOverrides: epicOverrides,
+            offerRegenerateDraft1: batch.offerRegenerateDraft1,
+            brainDump: brainDump,
+            namingTurn: namingTurn,
+            keys: Dictionary(
+                uniqueKeysWithValues: batch.siblings.compactMap { sibling in
+                    sibling.key.map { (sibling.id, $0.value) }
+                }
+            ),
+            writtenBlocksLinks: writtenBlocksLinks.sorted()
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(file).write(
+            to: folder.appending(component: "\(batch.id).json")
+        )
+    }
+
+    private func deleteBatchFile() throws {
+        guard let batch, let folder = projectRoot()?.appending(component: "batches") else {
+            return
+        }
+        let url = folder.appending(component: "\(batch.id).json")
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private var batchLoaded = false
+
+    private func loadBatchIfNeeded() throws {
+        if batchLoaded { return }
+        batchLoaded = true
+        guard let folder = projectRoot()?.appending(component: "batches"),
+            FileManager.default.fileExists(atPath: folder.path)
+        else { return }
+        let files = try FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension == "json" }.sorted {
+            $0.lastPathComponent < $1.lastPathComponent
+        }
+        guard let url = files.first, let drafts = draftsRoot() else { return }
+        let file = try JSONDecoder().decode(BatchFile.self, from: Data(contentsOf: url))
+        brainDump = file.brainDump
+        namingTurn = file.namingTurn
+        writtenBlocksLinks = Set(file.writtenBlocksLinks)
+        var siblings: [BatchSibling] = []
+        for id in file.draftIds {
+            let stored = try storedDraft(in: drafts.appending(component: id))
+            siblings.append(
+                BatchSibling(
+                    id: id,
+                    shortLabel: stored?.draft.shortLabel ?? "",
+                    epicKey: file.epicOverrides[id].map(TicketKey.init),
+                    ticketType: stored.flatMap { $0.draft.title.isEmpty ? nil : $0.draft.ticketType },
+                    key: file.keys[id].map(TicketKey.init) ?? stored?.draft.key,
+                    openQuestions: stored?.draft.openQuestions ?? []
+                )
+            )
+        }
+        batch = Batch(
+            name: file.name,
+            siblings: siblings,
+            focusedDraftId: file.focusedDraftId,
+            blocks: file.blocks,
+            offerRegenerateDraft1: file.offerRegenerateDraft1,
+            defaultEpicKey: file.defaultEpicKey.map(TicketKey.init),
+            id: url.deletingPathExtension().lastPathComponent
+        )
+        try loadSibling(file.focusedDraftId)
+    }
+
     private func persistDraft() throws {
         guard let draft, let root = projectRoot() else { return }
         let folder = root.appending(component: "drafts").appending(component: draft.id)
@@ -875,7 +1777,9 @@ public actor Session {
             shortLabel: draft.shortLabel,
             openQuestions: draft.openQuestions,
             key: draft.key?.value,
-            failedUploads: failedUploads
+            failedUploads: failedUploads,
+            rewrite: rewrite,
+            fetched: fetched
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -918,6 +1822,8 @@ public actor Session {
     private struct StoredDraft {
         var draft: Draft
         var failedUploads: [String]
+        var rewrite: Rewrite?
+        var fetched: RewriteTarget?
     }
 
     private struct MaterialRecord: Codable {
@@ -951,9 +1857,12 @@ public actor Session {
         var openQuestions: [String]
         var key: String?
         var failedUploads: [String]
+        var rewrite: Rewrite?
+        var fetched: RewriteTarget?
 
         enum CodingKeys: String, CodingKey {
             case ticketType, title, shortLabel, openQuestions, key, failedUploads
+            case rewrite, fetched
         }
 
         init(
@@ -962,7 +1871,9 @@ public actor Session {
             shortLabel: String,
             openQuestions: [String],
             key: String?,
-            failedUploads: [String]
+            failedUploads: [String],
+            rewrite: Rewrite?,
+            fetched: RewriteTarget?
         ) {
             self.ticketType = ticketType
             self.title = title
@@ -970,6 +1881,8 @@ public actor Session {
             self.openQuestions = openQuestions
             self.key = key
             self.failedUploads = failedUploads
+            self.rewrite = rewrite
+            self.fetched = fetched
         }
 
         init(from decoder: Decoder) throws {
@@ -980,12 +1893,33 @@ public actor Session {
             openQuestions = try container.decode([String].self, forKey: .openQuestions)
             key = try container.decodeIfPresent(String.self, forKey: .key)
             failedUploads = try container.decodeIfPresent([String].self, forKey: .failedUploads) ?? []
+            rewrite = try container.decodeIfPresent(Rewrite.self, forKey: .rewrite)
+            fetched = try container.decodeIfPresent(RewriteTarget.self, forKey: .fetched)
         }
     }
 
     private struct TranscriptLine: Codable {
         var role: String
         var text: String
+    }
+
+    private struct BatchFile: Codable {
+        var name: String
+        var draftIds: [String]
+        var focusedDraftId: String
+        var blocks: [String]
+        var defaultEpicKey: String?
+        var epicOverrides: [String: String]
+        var offerRegenerateDraft1: Bool
+        var brainDump: String
+        var namingTurn: String
+        var keys: [String: String]
+        var writtenBlocksLinks: [String]
+    }
+
+    private func structuralWarningsForSnapshot() -> [String] {
+        guard let draft, !draft.title.isEmpty || !draft.description.isEmpty else { return [] }
+        return structuralWarnings(for: draft)
     }
 
     private func snapshot() -> State {
@@ -1001,10 +1935,13 @@ public actor Session {
             textMaterialWarning: textMaterialWarning,
             materialWarnings: materialWarnings,
             failedUploads: failedUploads,
-            structuralWarnings: draft.map(structuralWarnings(for:)) ?? [],
+            structuralWarnings: structuralWarningsForSnapshot(),
             duplicateInterrupt: duplicateInterrupt,
             related: related,
-            status: status
+            status: status,
+            rewrite: rewrite,
+            rewriteError: rewriteError,
+            batch: batch
         )
     }
 }
@@ -1174,6 +2111,7 @@ private func decodeJSON<T: Decodable>(_ text: String) throws -> T {
 private let writingRules = """
     Writing rules:
     Context from the Catalog and Project terms is never Scope. Never invent Scope. For a Bug, never invent the reproduction path or the cause.
+    The agent never proposes a Batch. Fakthis holds the grouping.
     Vague Scope becomes a chat question in openQuestions, or stays blank plus the completeness marker.
     Functional, not technical, applies to Story and Bug.
     Story title: As a {Persona} I want {scope} so that {problem}. Bug title: the broken behaviour. Chore title: the action.
@@ -1189,6 +2127,12 @@ private let draftJSONInstruction = """
 private let generateInstruction = """
     \(draftJSONInstruction)
     Infer ticketType from the brain-dump. Default story if ambiguous. Do not ask ticket type as a question.
+    """
+
+private let rewriteGenerateInstruction = """
+    \(draftJSONInstruction)
+    Infer ticketType from the Material. Default story if ambiguous. Do not ask ticket type as a question.
+    Reshape against the template from this Material. Never invent Scope.
     """
 
 private let sendInstruction = """

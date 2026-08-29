@@ -57,7 +57,7 @@ enum FixtureProject {
 
 private actor FixtureTranscriber: Transcriber {
     func compileStatus() async -> CompileStatus { .done }
-    func transcribe(terms: [String]) async throws -> String { throw TranscribeFailed() }
+    func transcribe(boostList: [String]) async throws -> String { throw TranscribeFailed() }
 }
 
 private actor FixtureSecrets: Secrets {

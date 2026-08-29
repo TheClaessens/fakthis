@@ -2,6 +2,1514 @@ import Foundation
 import Testing
 import Fakthis
 
+@Test func namingABatchFromTheControlMakesTwoSiblingsAndDoesNotCallTheModel() async throws {
+    let harness = Harness()
+    let state = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let batch = try #require(state.batch)
+    #expect(batch.name == "Checkout totals")
+    #expect(batch.siblings.map(\.shortLabel) == ["scan bin", "export totals"])
+    #expect(batch.siblings.count == 2)
+    #expect(batch.focusedDraftId == batch.siblings[0].id)
+    #expect(state.draft?.id == batch.siblings[0].id)
+    #expect(state.draft?.shortLabel == "scan bin")
+    #expect(batch.blocks == batch.siblings.map(\.id))
+    #expect(await harness.model.completeRequests.isEmpty)
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func namingABatchRequiresAtLeastTwoDrafts() async throws {
+    let harness = Harness()
+    let state = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin"])
+    )
+    #expect(state.batch == nil)
+    #expect(state.draft == nil)
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
+@Test func generateOnABatchWritesTheFocusedSiblingAndSendsSiblingsAsContext() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.id == firstId)
+    #expect(draft.title == StoryReply.title)
+    #expect(draft.shortLabel == StoryReply.shortLabel)
+    #expect(generated.batch?.siblings[0].shortLabel == StoryReply.shortLabel)
+    #expect(generated.batch?.siblings[1].id == secondId)
+    #expect(generated.batch?.siblings[1].shortLabel == "export totals")
+
+    let siblingSidecar = try JSONDecoder().decode(
+        DiskSidecar.self,
+        from: Data(
+            contentsOf: harness.draftFolder(id: secondId).appending(component: "draft.json")
+        )
+    )
+    #expect(siblingSidecar.title == "")
+    #expect(siblingSidecar.shortLabel == "export totals")
+
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.user.contains(StoryReply.brainDump))
+    #expect(request.user.contains("Draft 1 of 2"))
+    #expect(request.user.contains("scan bin"))
+    #expect(request.user.contains("export totals"))
+    #expect(request.system.contains("Never invent Scope"))
+}
+
+@Test func namingABatchAfterADraftExistsMakesItDraft1AndOffersRegenerate() async throws {
+    let harness = Harness()
+    let generated = try await harness.generateStory()
+    let original = try #require(generated.draft)
+    let requestsBefore = await harness.model.completeRequests.count
+    #expect(generated.batch == nil)
+
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let batch = try #require(named.batch)
+    #expect(batch.siblings[0].id == original.id)
+    #expect(named.draft?.id == original.id)
+    #expect(named.draft?.title == original.title)
+    #expect(named.draft?.description == original.description)
+    #expect(batch.offerRegenerateDraft1 == true)
+    #expect(batch.siblings.count == 2)
+    #expect(batch.siblings[1].shortLabel == "export totals")
+    #expect(batch.focusedDraftId == original.id)
+    #expect(await harness.model.completeRequests.count == requestsBefore)
+}
+
+@Test func generateOnDraft1AcceptsTheRegenerateOffer() async throws {
+    let harness = Harness()
+    let generated = try await harness.generateStory()
+    let originalDescription = try #require(generated.draft?.description)
+    _ = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: "scan bin",
+            description: "Scope that belongs to this sibling only.",
+            openQuestions: []
+        )
+    )
+    let regenerated = try await harness.session.perform(.generate)
+    #expect(regenerated.draft?.description.contains("Scope that belongs to this sibling only.") == true)
+    #expect(regenerated.draft?.description != originalDescription)
+    #expect(regenerated.batch?.offerRegenerateDraft1 == false)
+}
+
+@Test func dismissingTheRegenerateOfferLeavesDraft1Unchanged() async throws {
+    let harness = Harness()
+    let generated = try await harness.generateStory()
+    let original = try #require(generated.draft)
+    let requestsBefore = await harness.model.completeRequests.count
+    _ = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let dismissed = try await harness.session.perform(.dismissRegenerateOffer)
+    #expect(dismissed.batch?.offerRegenerateDraft1 == false)
+    #expect(dismissed.draft?.id == original.id)
+    #expect(dismissed.draft?.description == original.description)
+    #expect(await harness.model.completeRequests.count == requestsBefore)
+}
+
+@Test func focusingASiblingMakesGenerateWriteThatDraftOnly() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+    let first = try await harness.session.perform(.generate)
+    #expect(first.draft?.id == firstId)
+    #expect(first.draft?.title == StoryReply.title)
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    let focused = try await harness.session.perform(.focusDraft(secondId))
+    #expect(focused.draft?.id == secondId)
+    #expect(focused.batch?.focusedDraftId == secondId)
+    #expect(focused.draft?.title == "")
+
+    let second = try await harness.session.perform(.generate)
+    #expect(second.draft?.id == secondId)
+    #expect(second.draft?.title == ChoreReply.title)
+    #expect(second.draft?.ticketType == .chore)
+    #expect(second.batch?.siblings[0].id == firstId)
+    #expect(second.batch?.siblings[1].shortLabel == "export totals")
+
+    let firstSidecar = try JSONDecoder().decode(
+        DiskSidecar.self,
+        from: Data(contentsOf: harness.draftFolder(id: firstId).appending(component: "draft.json"))
+    )
+    #expect(firstSidecar.title == StoryReply.title)
+
+    let requests = await harness.model.completeRequests
+    let siblingGenerate = try #require(requests.first { $0.user.contains("Draft 2 of 2") })
+    #expect(siblingGenerate.user.contains(StoryReply.brainDump))
+    #expect(siblingGenerate.user.contains("export totals"))
+}
+
+@Test func aDumpTakeStillAppendsAfterNamingABatchAndBeforeGenerate() async throws {
+    let harness = Harness()
+    await harness.transcriber.enqueueTake("we need pickers to scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    _ = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    await harness.transcriber.enqueueTake("and export the totals")
+    _ = try await harness.session.perform(.startListening)
+    let committed = try await harness.session.perform(.stopListening)
+    #expect(committed.field == "we need pickers to scan the bin and export the totals")
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
+@Test func aSiblingGenerateAfterMidChatConversionUsesTheDumpAndTheNamingTurn() async throws {
+    let harness = Harness()
+    _ = try await harness.generateStory()
+    _ = try await harness.session.perform(
+        .typeBrainDump("that's three tickets: scan bin and export totals")
+    )
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.generate)
+    let request = try #require(
+        await harness.model.completeRequests.first { $0.user.contains("Draft 2 of 2") }
+    )
+    #expect(request.user.contains(StoryReply.brainDump))
+    #expect(request.user.contains("that's three tickets: scan bin and export totals"))
+    #expect(request.user.contains("export totals"))
+}
+
+@Test func aChatAnswerStaysWithTheFocusedSibling() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(.generate)
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    _ = try await harness.session.perform(.generate)
+
+    _ = try await harness.session.perform(.focusDraft(firstId))
+    _ = try await harness.session.perform(.typeBrainDump("show a blocking error on the pick screen"))
+    let onChore = try await harness.session.perform(.focusDraft(secondId))
+    #expect(onChore.field != "show a blocking error on the pick screen")
+    _ = try await harness.session.perform(.typeBrainDump("bump the scanner SDK"))
+    let back = try await harness.session.perform(.focusDraft(firstId))
+    #expect(back.field == "show a blocking error on the pick screen")
+}
+
+@Test func sendRevisesOnlyTheFocusedBatchSibling() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(.generate)
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    _ = try await harness.session.perform(.generate)
+
+    _ = try await harness.session.perform(.focusDraft(firstId))
+    _ = try await harness.session.perform(.typeBrainDump("show a blocking error on the pick screen"))
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: StoryReply.shortLabel,
+            description: "Revised pick-screen Scope only.",
+            openQuestions: []
+        )
+    )
+    let sent = try await harness.session.perform(.send)
+    #expect(sent.draft?.id == firstId)
+    #expect(sent.draft?.description.contains("Revised pick-screen Scope only.") == true)
+
+    let siblingSidecar = try JSONDecoder().decode(
+        DiskSidecar.self,
+        from: Data(contentsOf: harness.draftFolder(id: secondId).appending(component: "draft.json"))
+    )
+    #expect(siblingSidecar.title == ChoreReply.title)
+
+    let request = try #require(
+        await harness.model.completeRequests.last { $0.user.contains("Chat answer:") }
+    )
+    #expect(request.user.contains("Draft 1 of 2"))
+}
+
+@Test func addingADraftToABatchAppendsAnEmptySibling() async throws {
+    let harness = Harness()
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let focused = try #require(named.batch?.focusedDraftId)
+    let added = try await harness.session.perform(.addDraft(shortLabel: "upgrade SDK"))
+    let batch = try #require(added.batch)
+    #expect(batch.siblings.map(\.shortLabel) == ["scan bin", "export totals", "upgrade SDK"])
+    #expect(batch.siblings.count == 3)
+    #expect(batch.blocks == batch.siblings.map(\.id))
+    #expect(batch.focusedDraftId == focused)
+    #expect(added.draft?.id == focused)
+    let newId = batch.siblings[2].id
+    let sidecar = try JSONDecoder().decode(
+        DiskSidecar.self,
+        from: Data(contentsOf: harness.draftFolder(id: newId).appending(component: "draft.json"))
+    )
+    #expect(sidecar.title == "")
+    #expect(sidecar.shortLabel == "upgrade SDK")
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
+@Test func removingASiblingDeletesItAndKeepsTheBatch() async throws {
+    let harness = Harness()
+    let named = try await harness.session.perform(
+        .nameBatch(
+            name: "Checkout totals",
+            shortLabels: ["scan bin", "export totals", "upgrade SDK"]
+        )
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let removedId = try #require(named.batch?.siblings[1].id)
+    let lastId = try #require(named.batch?.siblings[2].id)
+    let removed = try await harness.session.perform(.removeDraft(removedId))
+    let batch = try #require(removed.batch)
+    #expect(batch.siblings.map(\.id) == [firstId, lastId])
+    #expect(batch.blocks == [firstId, lastId])
+    #expect(removed.draft?.id == firstId)
+    #expect(
+        !FileManager.default.fileExists(atPath: harness.draftFolder(id: removedId).path)
+    )
+}
+
+@Test func removingTheLastExtraDissolvesTheBatchIntoTheRemainingDraft() async throws {
+    let harness = Harness()
+    let generated = try await harness.generateStory()
+    let original = try #require(generated.draft)
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let extraId = try #require(named.batch?.siblings[1].id)
+    let dissolved = try await harness.session.perform(.removeDraft(extraId))
+    #expect(dissolved.batch == nil)
+    #expect(dissolved.draft?.id == original.id)
+    #expect(dissolved.draft?.title == original.title)
+    #expect(
+        !FileManager.default.fileExists(atPath: harness.draftFolder(id: extraId).path)
+    )
+}
+
+@Test func renamingASiblingEditsTheListWithoutCallingTheModel() async throws {
+    let harness = Harness()
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let renamed = try await harness.session.perform(
+        .renameSibling(id: firstId, shortLabel: "scan tote")
+    )
+    #expect(renamed.batch?.siblings[0].shortLabel == "scan tote")
+    #expect(renamed.draft?.shortLabel == "scan tote")
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
+@Test func aBatchTakesOneExistingEpicAsDefaultOverrideablePerDraft() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress"),
+            CatalogEpic(key: TicketKey("FAK-200"), name: "Exports", status: "To Do"),
+        ],
+        rows: [],
+        componentNames: []
+    )
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+
+    let withDefault = try await harness.session.perform(.setDefaultEpic(TicketKey("FAK-100")))
+    #expect(withDefault.batch?.defaultEpicKey == TicketKey("FAK-100"))
+
+    let invented = try await harness.session.perform(.setDefaultEpic(TicketKey("FAK-999")))
+    #expect(invented.batch?.defaultEpicKey == TicketKey("FAK-100"))
+
+    let overridden = try await harness.session.perform(
+        .overrideEpic(id: secondId, TicketKey("FAK-200"))
+    )
+    #expect(overridden.batch?.siblings[0].id == firstId)
+    #expect(overridden.batch?.siblings[0].epicKey == nil)
+    #expect(overridden.batch?.siblings[1].epicKey == TicketKey("FAK-200"))
+
+    let cleared = try await harness.session.perform(.overrideEpic(id: secondId, nil))
+    #expect(cleared.batch?.siblings[1].epicKey == nil)
+    #expect(cleared.batch?.defaultEpicKey == TicketKey("FAK-100"))
+}
+
+@Test func blocksFollowNamedOrderAndAreEditableAndClearable() async throws {
+    let harness = Harness()
+    let named = try await harness.session.perform(
+        .nameBatch(
+            name: "Checkout totals",
+            shortLabels: ["scan bin", "export totals", "upgrade SDK"]
+        )
+    )
+    let ids = try #require(named.batch?.siblings.map(\.id))
+    #expect(named.batch?.blocks == ids)
+
+    let reordered = try await harness.session.perform(.setBlocks([ids[1], ids[0], ids[2]]))
+    #expect(reordered.batch?.blocks == [ids[1], ids[0], ids[2]])
+    #expect(reordered.batch?.siblings.map(\.id) == ids)
+
+    let independent = try await harness.session.perform(.clearBlocks)
+    #expect(independent.batch?.blocks == [])
+    #expect(independent.batch?.siblings.count == 3)
+}
+
+@Test func textMaterialIsVisibleToEveryBatchGenerate() async throws {
+    let harness = Harness()
+    let email = "From: client@acme.com\nWe need pickers to scan the bin before they pick."
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "client-email.txt", mimeType: "text/plain", data: Data(email.utf8))
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(.generate)
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    _ = try await harness.session.perform(.generate)
+
+    let generateRequests = await harness.model.completeRequests.filter {
+        $0.user.contains("Draft ")
+    }
+    #expect(generateRequests.count == 2)
+    for request in generateRequests {
+        #expect(request.user.contains(email))
+        #expect(request.user.contains("client-email.txt"))
+    }
+}
+
+@Test func screenshotsDefaultToTheFocusedDraftAndCanBeAssignedToMore() async throws {
+    let harness = Harness()
+    let png = Data("fake-png-bytes".utf8)
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(
+        .attachMaterial(Material(filename: "pick.png", mimeType: "image/png", data: png))
+    )
+    _ = try await harness.session.perform(.generate)
+    let firstGenerate = try #require(
+        await harness.model.completeRequests.first { $0.user.contains("Draft 1 of 2") }
+    )
+    #expect(firstGenerate.screenshots.map(\.filename) == ["pick.png"])
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    _ = try await harness.session.perform(.generate)
+    let secondGenerate = try #require(
+        await harness.model.completeRequests.first { $0.user.contains("Draft 2 of 2") }
+    )
+    #expect(secondGenerate.screenshots.isEmpty)
+
+    _ = try await harness.session.perform(
+        .assignMedia(filename: "pick.png", draftIds: [firstId, secondId])
+    )
+    _ = try await harness.session.perform(.generate)
+    let assignedGenerate = try #require(
+        await harness.model.completeRequests.last { $0.user.contains("Draft 2 of 2") }
+    )
+    #expect(assignedGenerate.screenshots.map(\.filename) == ["pick.png"])
+}
+
+@Test func submitCreatesABatchInBlocksOrderAndWritesLinksWhenBothKeysExist() async throws {
+    let harness = Harness()
+    let ids = try await harness.generateTwoSiblingBatch()
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.batch == nil)
+    #expect(submitted.draft?.key == TicketKey("FAK-2"))
+
+    let created = await harness.jira.created
+    #expect(created.map(\.title) == [StoryReply.title, ChoreReply.title])
+    let links = await harness.jira.blocksLinks
+    #expect(links.count == 1)
+    #expect(links[0].blocker == TicketKey("FAK-1"))
+    #expect(links[0].blocked == TicketKey("FAK-2"))
+    #expect(submitted.catalog.rows.map(\.key) == [TicketKey("FAK-1"), TicketKey("FAK-2")])
+    #expect(
+        !FileManager.default.fileExists(atPath: harness.draftFolder(id: ids.0).path)
+    )
+    #expect(
+        !FileManager.default.fileExists(atPath: harness.draftFolder(id: ids.1).path)
+    )
+}
+
+@Test func submitStopsOnTheFirstCreateFailureAndRetryCreatesTheRest() async throws {
+    let harness = Harness()
+    _ = try await harness.generateTwoSiblingBatch()
+    await harness.jira.setFailOnCreate(2)
+    let failed = try await harness.session.perform(.submit)
+    #expect(await harness.jira.created.count == 1)
+    #expect(failed.batch?.siblings[0].key == TicketKey("FAK-1"))
+    #expect(failed.batch?.siblings[1].key == nil)
+    #expect(await harness.jira.blocksLinks.isEmpty)
+
+    await harness.jira.setFailOnCreate(nil)
+    let retried = try await harness.session.perform(.submit)
+    #expect(await harness.jira.created.map(\.title) == [StoryReply.title, ChoreReply.title])
+    #expect(retried.batch == nil)
+    #expect(retried.catalog.rows.map(\.key) == [TicketKey("FAK-1"), TicketKey("FAK-2")])
+    let links = await harness.jira.blocksLinks
+    #expect(links.count == 1)
+    #expect(links[0].blocker == TicketKey("FAK-1"))
+    #expect(links[0].blocked == TicketKey("FAK-2"))
+}
+
+@Test func restartAfterAPartialBatchSubmitRetriesTheRestWithoutRecreating() async throws {
+    let harness = Harness()
+    _ = try await harness.generateTwoSiblingBatch()
+    await harness.jira.setFailOnCreate(2)
+    _ = try await harness.session.perform(.submit)
+    #expect(await harness.jira.created.count == 1)
+
+    let restarted = harness.reopen()
+    await harness.jira.setFailOnCreate(nil)
+    let retried = try await restarted.perform(.submit)
+    #expect(await harness.jira.created.map(\.title) == [StoryReply.title, ChoreReply.title])
+    #expect(retried.catalog.rows.map(\.key) == [TicketKey("FAK-1"), TicketKey("FAK-2")])
+    let links = await harness.jira.blocksLinks
+    #expect(links.count == 1)
+    #expect(links[0].blocker == TicketKey("FAK-1"))
+    #expect(links[0].blocked == TicketKey("FAK-2"))
+}
+
+@Test func submitUsesTheDraftEpicOrTheBatchDefault() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress"),
+            CatalogEpic(key: TicketKey("FAK-200"), name: "Exports", status: "To Do"),
+        ],
+        rows: [],
+        componentNames: []
+    )
+    let named = try await harness.generateTwoSiblingBatch()
+    _ = try await harness.session.perform(.setDefaultEpic(TicketKey("FAK-100")))
+    _ = try await harness.session.perform(
+        .overrideEpic(id: named.1, TicketKey("FAK-200"))
+    )
+    _ = try await harness.session.perform(.submit)
+    let created = await harness.jira.created
+    #expect(created[0].parentKey == TicketKey("FAK-100"))
+    #expect(created[1].parentKey == TicketKey("FAK-200"))
+}
+
+@Test func clearingBlocksSubmitsTheBatchWithoutLinks() async throws {
+    let harness = Harness()
+    _ = try await harness.generateTwoSiblingBatch()
+    _ = try await harness.session.perform(.clearBlocks)
+    _ = try await harness.session.perform(.submit)
+    #expect(await harness.jira.created.count == 2)
+    #expect(await harness.jira.blocksLinks.isEmpty)
+}
+
+@Test func batchSiblingsAreNotDuplicatesOfEachOther() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "scan bin location"])
+    )
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(.generate)
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: StoryReply.shortLabel,
+            description: StoryReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    let second = try await harness.session.perform(.generate)
+    #expect(second.duplicateInterrupt == nil)
+    #expect(second.batch?.duplicates.isEmpty == true)
+}
+
+@Test func aBatchHasOneDuplicateInterruptListingWhichDraftsHitWhichKeys() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+    let ids = try await harness.generateTwoSiblingBatch()
+    let state = try await harness.session.state()
+    #expect(state.duplicateInterrupt == nil)
+    let duplicates = try #require(state.batch?.duplicates)
+    #expect(duplicates.count == 1)
+    #expect(duplicates[0].draftId == ids.0)
+    #expect(duplicates[0].hit.key == TicketKey("FAK-231"))
+    #expect(duplicates[0].shortLabel == StoryReply.shortLabel)
+
+    let dismissed = try await harness.session.perform(.dismissDuplicate)
+    #expect(dismissed.batch?.duplicates.isEmpty == true)
+    #expect(dismissed.duplicateInterrupt == nil)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(await harness.jira.created.count == 2)
+    #expect(submitted.batch == nil)
+}
+
+@Test func restartingSessionRestoresTheBatchAndFocusedDraft() async throws {
+    let harness = Harness()
+    let ids = try await harness.generateTwoSiblingBatch()
+    let restarted = harness.reopen()
+    let state = try await restarted.state()
+    let batch = try #require(state.batch)
+    #expect(batch.siblings.map(\.id) == [ids.0, ids.1])
+    #expect(batch.focusedDraftId == ids.1)
+    #expect(state.draft?.id == ids.1)
+    #expect(state.draft?.title == ChoreReply.title)
+    #expect(batch.blocks == [ids.0, ids.1])
+}
+
+@Test func assignedMediaUploadsToEachSiblingOnSubmit() async throws {
+    let harness = Harness()
+    let png = Data("fake-png-bytes".utf8)
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let named = try await harness.session.perform(
+        .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+    )
+    let firstId = try #require(named.batch?.siblings[0].id)
+    let secondId = try #require(named.batch?.siblings[1].id)
+    _ = try await harness.session.perform(
+        .attachMaterial(Material(filename: "pick.png", mimeType: "image/png", data: png))
+    )
+    _ = try await harness.session.perform(.generate)
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .chore,
+            title: ChoreReply.title,
+            shortLabel: "export totals",
+            description: ChoreReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.focusDraft(secondId))
+    _ = try await harness.session.perform(.generate)
+    _ = try await harness.session.perform(
+        .assignMedia(filename: "pick.png", draftIds: [firstId, secondId])
+    )
+    _ = try await harness.session.perform(.submit)
+    let uploads = await harness.jira.uploaded
+    #expect(uploads.map(\.filename) == ["pick.png", "pick.png"])
+    #expect(Set(uploads.map(\.key.value)) == ["FAK-1", "FAK-2"])
+}
+
+@Test func pasteKeyFetchesLiveBodyAsMaterialAndBindsAnEmptyDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "The live description is messy.",
+                comments: ["newest comment", "older comment"]
+            )
+        ],
+        componentNames: []
+    )
+
+    let state = try await harness.session.perform(.pasteKey("FAK-231"))
+    let draft = try #require(state.draft)
+    #expect(draft.key == TicketKey("FAK-231"))
+    #expect(draft.title.isEmpty)
+    #expect(draft.description.isEmpty)
+    #expect(draft.shortLabel.isEmpty)
+    let rewrite = try #require(state.rewrite)
+    #expect(rewrite.liveTitle == "Scan tote before pick")
+    #expect(rewrite.liveDescription == "The live description is messy.")
+    #expect(rewrite.comments == ["newest comment", "older comment"])
+    #expect(rewrite.watchersNote.contains("FAK-231") == true)
+    #expect(await harness.model.completeRequests.isEmpty)
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func pasteKeyOnAMissingTicketIsAnErrorNotACreate() async throws {
+    let harness = Harness()
+    let state = try await harness.session.perform(.pasteKey("FAK-404"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == "FAK-404 was not found")
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func pasteKeyRejectsAnotherProjectsKey() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "ABC-1",
+                title: "Other project ticket",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Must not become Material",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    let state = try await harness.session.perform(.pasteKey("ABC-1"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == "ABC-1 is not in this Project")
+    #expect(await harness.jira.fetchRewriteCalls.isEmpty)
+}
+
+@Test func pasteKeyRejectsAnEpicKey() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [
+            SeededEpic(
+                key: "FAK-100",
+                name: "Warehouse picking",
+                status: "In Progress",
+                description: "Epic Scope"
+            )
+        ],
+        issues: [
+            SeededIssue(
+                key: "FAK-100",
+                title: "Warehouse picking",
+                jiraIssueType: "Epic",
+                labels: [],
+                parentEpicKey: nil,
+                status: "In Progress",
+                created: Date(),
+                body: "Epic Scope must not become a rewrite Draft",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    let state = try await harness.session.perform(.pasteKey("FAK-100"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == "FAK-100 is an epic")
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func unreachableJiraAtPasteKeyDoesNotStartARewrite() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "must not become Material",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.setUnreachable(true)
+    let state = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(state.draft == nil)
+    #expect(state.rewrite == nil)
+    #expect(state.rewriteError == nil)
+}
+
+@Test func emptyGenerateOnARewriteReshapesFromMaterialAndInventsNoScope() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Pickers scan a tote. Steps are missing.",
+                comments: ["The expected result is still blank."]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.key == TicketKey("FAK-231"))
+    #expect(draft.title == StoryReply.title)
+    #expect(draft.shortLabel == StoryReply.shortLabel)
+    #expect(draft.description.contains(StoryReply.definitionOfDone))
+
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.user.contains("Pickers scan a tote. Steps are missing."))
+    #expect(request.user.contains("The expected result is still blank."))
+    #expect(request.system.contains("Never invent Scope"))
+    #expect(request.system.contains("Reshape"))
+}
+
+@Test func updateWritesTitleDescriptionAndCompletenessMarkerAndDoesNotChangeJiraIssueType()
+    async throws
+{
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Bug",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The pick screen is wrong.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let ready = try await harness.session.perform(.generate)
+    #expect(ready.rewrite?.watchersNote.contains("FAK-231") == true)
+    let updated = try await harness.session.perform(.update)
+    #expect(updated.draft?.key == TicketKey("FAK-231"))
+    #expect(updated.rewrite == nil)
+
+    #expect(await harness.jira.created.isEmpty)
+    let write = try #require(await harness.jira.updated.first)
+    #expect(write.key == TicketKey("FAK-231"))
+    #expect(write.title == StoryReply.title)
+    #expect(write.descriptionWiki.contains("----"))
+    #expect(write.completenessMarker == .clear)
+
+    let row = try #require(updated.catalog.rows.first { $0.key == TicketKey("FAK-231") })
+    #expect(row.shortLabel == StoryReply.shortLabel)
+    #expect(row.ticketType == .story)
+}
+
+@Test func leftoverCreateSubmitDoesNotWriteOverTheLiveTicket() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let created = try await harness.session.perform(.generate)
+    let createId = try #require(created.draft?.id)
+    #expect(created.draft?.key == nil)
+
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-231"))
+    #expect(await harness.jira.created.isEmpty)
+    #expect(
+        FileManager.default.fileExists(atPath: harness.draftFolder(id: createId).path)
+    )
+}
+
+@Test func keepLiveTitlePutsTheFetchedTitleOnTheDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.draft?.title == StoryReply.title)
+    let kept = try await harness.session.perform(.keepLiveTitle)
+    #expect(kept.draft?.title == "Scan tote before pick")
+    #expect(kept.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func workOnDuplicateOfAJiraKeyOpensTheRewriteLoop() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body as Material",
+                comments: ["a comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.duplicateInterrupt?.key == TicketKey("FAK-231"))
+
+    let rewritten = try await harness.session.perform(.workOnDuplicate)
+    #expect(rewritten.duplicateInterrupt == nil)
+    #expect(rewritten.draft?.key == TicketKey("FAK-231"))
+    #expect(rewritten.draft?.title.isEmpty == true)
+    #expect(rewritten.rewrite?.liveDescription == "Live body as Material")
+    #expect(rewritten.rewrite?.comments == ["a comment"])
+}
+
+@Test func staleJiraAtUpdateWarnsAndRefetchKeepsTheDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Original live body",
+                comments: ["old comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let title = try #require(generated.draft?.title)
+
+    await harness.jira.replaceIssue(
+        key: "FAK-231",
+        title: "Scan tote before pick",
+        body: "Someone edited this in Jira",
+        comments: ["new comment"],
+        updated: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    let warned = try await harness.session.perform(.update)
+    #expect(warned.rewrite?.stale == true)
+    #expect(warned.draft?.title == title)
+    #expect(await harness.jira.updated.isEmpty)
+
+    let refreshed = try await harness.session.perform(.refetch)
+    #expect(refreshed.rewrite?.stale == false)
+    #expect(refreshed.rewrite?.liveDescription == "Someone edited this in Jira")
+    #expect(refreshed.rewrite?.comments == ["new comment"])
+    #expect(refreshed.draft?.title == title)
+
+    let written = try await harness.session.perform(.update)
+    #expect(await harness.jira.updated.count == 1)
+    #expect(written.draft?.title == title)
+}
+
+@Test func staleJiraAtUpdateClobberWritesAnywayAndKeepsTheDraft() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Original live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let title = try #require(generated.draft?.title)
+
+    await harness.jira.replaceIssue(
+        key: "FAK-231",
+        title: "Scan tote before pick",
+        body: "Someone edited this in Jira",
+        comments: [],
+        updated: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    _ = try await harness.session.perform(.update)
+    #expect(await harness.jira.updated.isEmpty)
+
+    let written = try await harness.session.perform(.clobber)
+    #expect(written.draft?.title == title)
+    #expect(await harness.jira.updated.count == 1)
+}
+
+@Test func updateDoesNotRequireGenerate() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.keepLiveTitle)
+    let updated = try await harness.session.perform(.update)
+    #expect(await harness.jira.created.isEmpty)
+    let write = try #require(await harness.jira.updated.first)
+    #expect(write.key == TicketKey("FAK-231"))
+    #expect(write.title == "Scan tote before pick")
+    #expect(updated.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func afterUpdateGenerateDoesNotKeepEditingTheTicket() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let updated = try await harness.session.perform(.update)
+    #expect(updated.rewrite == nil)
+    #expect(await harness.jira.updated.count == 1)
+
+    _ = try await harness.session.perform(.generate)
+    #expect(await harness.model.completeRequests.count == 2)
+}
+
+@Test func updateUpsertsTheCatalogRowWithShortLabelAndTicketType() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["warehouse"],
+                parentEpicKey: TicketKey("FAK-100"),
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: ["warehouse"],
+                parentEpicKey: "FAK-100",
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let updated = try await harness.session.perform(.update)
+    let row = try #require(updated.catalog.rows.first { $0.key == TicketKey("FAK-231") })
+    #expect(row.shortLabel == StoryReply.shortLabel)
+    #expect(row.ticketType == .story)
+    #expect(row.labels == ["warehouse"])
+    #expect(row.parentEpicKey == TicketKey("FAK-100"))
+    #expect(row.status == "To Do")
+    #expect(row.jiraIssueType == "Story")
+}
+
+@Test func unreachableJiraAtUpdateLeavesTheDraftAndRetrySucceeds() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    await harness.jira.setUnreachable(true)
+    let blocked = try await harness.session.perform(.update)
+    #expect(blocked.draft?.key == TicketKey("FAK-231"))
+    #expect(blocked.rewrite != nil)
+    #expect(await harness.jira.updated.isEmpty)
+
+    await harness.jira.setUnreachable(false)
+    let retried = try await harness.session.perform(.update)
+    #expect(await harness.jira.updated.count == 1)
+    #expect(retried.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func pasteKeyDoesNotDownloadExistingAttachments() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(await harness.jira.uploadAttachmentCalls == 0)
+    #expect(await harness.jira.attachmentPolicyCalls == 0)
+    #expect(await harness.jira.created.isEmpty)
+}
+
+@Test func restartKeepsARewriteDraftBoundToTheKey() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The live description is messy.",
+                comments: ["newest comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    let generated = try await harness.session.perform(.generate)
+    let title = try #require(generated.draft?.title)
+
+    let restarted = harness.reopen()
+    let restored = try await restarted.state()
+    #expect(restored.draft?.key == TicketKey("FAK-231"))
+    #expect(restored.draft?.title == title)
+    #expect(restored.rewrite?.liveDescription == "The live description is messy.")
+    #expect(restored.rewrite?.comments == ["newest comment"])
+
+    let written = try await restarted.perform(.update)
+    #expect(await harness.jira.updated.count == 1)
+    #expect(written.draft?.title == title)
+}
+
+@Test func leftoverCreateFolderOnRestartStillDoesNotSubmitOverTheLiveTicket() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let created = try await harness.session.perform(.generate)
+    let createId = try #require(created.draft?.id)
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+
+    let restarted = harness.reopen()
+    let submitted = try await restarted.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-231"))
+    #expect(await harness.jira.created.isEmpty)
+    #expect(
+        FileManager.default.fileExists(atPath: harness.draftFolder(id: createId).path)
+    )
+}
+
+@Test func sendOnARewriteRevisesTheDraftAndDoesNotCreate() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: "As a warehouse picker I want to scan a tote so that I pick from the right location",
+            shortLabel: StoryReply.shortLabel,
+            description: "Revised from the chat answer.",
+            openQuestions: []
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump("call it a tote, not a bin"))
+    let sent = try await harness.session.perform(.send)
+    #expect(sent.draft?.key == TicketKey("FAK-231"))
+    #expect(sent.draft?.description.contains("Revised from the chat answer") == true)
+    #expect(await harness.jira.created.isEmpty)
+    #expect(await harness.jira.updated.isEmpty)
+}
+
+@Test func spokenAskOnARewriteReplacesTheField() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    await harness.transcriber.enqueueTake("call it a tote, not a bin")
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.typeBrainDump("typed ask"))
+    _ = try await harness.session.perform(.startListening)
+    let committed = try await harness.session.perform(.stopListening)
+    #expect(committed.field == "call it a tote, not a bin")
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
+@Test func refetchKeepsFilesThePMAttached() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(timeIntervalSince1970: 1_700_000_000),
+                body: "Original live body",
+                comments: ["old comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "client-email.txt",
+                mimeType: "text/plain",
+                data: Data("Please fix the tote scan.".utf8)
+            )
+        )
+    )
+    await harness.jira.replaceIssue(
+        key: "FAK-231",
+        title: "Scan tote before pick",
+        body: "Someone edited this in Jira",
+        comments: ["new comment"],
+        updated: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    let refreshed = try await harness.session.perform(.refetch)
+    #expect(refreshed.rewrite?.liveDescription == "Someone edited this in Jira")
+    #expect(refreshed.rewrite?.comments == ["new comment"])
+    let generated = try await harness.session.perform(.generate)
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.user.contains("Please fix the tote scan."))
+    #expect(request.user.contains("Someone edited this in Jira"))
+    #expect(generated.draft?.key == TicketKey("FAK-231"))
+}
+
+@Test func rewriteGenerateHintsTicketTypeWhenJiraIssueTypeMapsOneToOne() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Bug",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The pick screen is wrong.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.system.contains("Jira issue type Bug maps 1:1 to bug"))
+}
+
+@Test func rewriteGenerateDoesNotHintTicketTypeWhenJiraIssueTypeMapsManyToOne() async throws {
+    let harness = Harness(ticketTypeMapping: [
+        .story: "Task",
+        .bug: "Task",
+        .chore: "Task",
+    ])
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Task",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The pick screen is wrong.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(.pasteKey("FAK-231"))
+    _ = try await harness.session.perform(.generate)
+    let request = try #require(await harness.model.completeRequests.first)
+    #expect(request.system.contains("maps 1:1") == false)
+}
+
+@Test func rewriteCommentsCapAtFiftyAndSaySoWhenTruncated() async throws {
+    let harness = Harness()
+    let comments = (1...51).map { "comment \($0)" }
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body",
+                comments: comments
+            )
+        ],
+        componentNames: []
+    )
+    let state = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(state.rewrite?.comments.count == 50)
+    #expect(state.rewrite?.comments.first == "comment 1")
+    #expect(state.rewrite?.commentsTruncated == true)
+}
+
 @Test func dumpToggleAppendsTheTakeAndGenerateIsASeparatePress() async throws {
     let harness = Harness()
     await harness.transcriber.enqueueTake(
@@ -74,7 +1582,7 @@ import Fakthis
     await harness.transcriber.enqueueTake("scan the bin")
     _ = try await harness.session.perform(.startListening)
     _ = try await harness.session.perform(.stopListening)
-    #expect(await harness.transcriber.transcribeTerms == [[]])
+    #expect(await harness.transcriber.boostLists == [[]])
 }
 
 @Test func bothVoiceTiersPassProjectTermsOnTheBatchPass() async throws {
@@ -82,16 +1590,66 @@ import Fakthis
     await harness.transcriber.enqueueTake("scan the bin")
     _ = try await harness.session.perform(.startListening)
     _ = try await harness.session.perform(.stopListening)
-    #expect(await harness.transcriber.transcribeTerms == [["bin", "pick screen"]])
+    #expect(await harness.transcriber.boostLists == [["bin", "pick screen"]])
 
     _ = try await harness.session.perform(.generate)
     await harness.transcriber.enqueueTake("show a blocking error")
     _ = try await harness.session.perform(.startListening)
     _ = try await harness.session.perform(.stopListening)
-    #expect(await harness.transcriber.transcribeTerms == [
+    #expect(await harness.transcriber.boostLists == [
         ["bin", "pick screen"],
         ["bin", "pick screen"],
     ])
+}
+
+@Test func stopListeningProjectsProjectTermsThenEpicNamesThenComponentsAndNeverTitles() async throws {
+    let harness = Harness(terms: ["bin", "SM-A-rt"])
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [
+            CatalogEpic(key: TicketKey("FAK-100"), name: "Warehouse picking", status: "In Progress"),
+            CatalogEpic(key: TicketKey("FAK-200"), name: "Exports", status: "To Do"),
+        ],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: "This title must not be boosted",
+                jiraIssueType: "Story"
+            ),
+        ],
+        componentNames: ["Pick App"]
+    )
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    #expect(await harness.transcriber.boostLists == [[
+        "bin",
+        "SM-A-rt",
+        "Warehouse picking",
+        "Exports",
+        "Pick App",
+    ]])
+}
+
+@Test func transcriberBoostListCapsAtOneHundredKeepingTermsThenEpics() async throws {
+    let terms = (1...80).map { "term-\($0)" }
+    let harness = Harness(terms: terms)
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: (1...30).map {
+            CatalogEpic(key: TicketKey("FAK-\($0)"), name: "epic-\($0)", status: "To Do")
+        },
+        rows: [],
+        componentNames: (1...10).map { "component-\($0)" }
+    )
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    let passed = try #require(await harness.transcriber.boostLists.first)
+    #expect(passed.count == TranscriberBoost.cap)
+    #expect(passed.prefix(80) == ArraySlice(terms))
+    #expect(Array(passed.dropFirst(80)) == (1...20).map { "epic-\($0)" })
+    #expect(!passed.contains("component-1"))
 }
 
 @Test func typeOverAfterATakeIsWhatGenerateSends() async throws {
@@ -119,7 +1677,7 @@ import Fakthis
     let generated = try await harness.session.perform(.generate)
     #expect(generated.field == StoryReply.brainDump)
     #expect(await harness.model.completeRequests.first?.user == StoryReply.brainDump)
-    #expect(await harness.transcriber.transcribeTerms.isEmpty)
+    #expect(await harness.transcriber.boostLists.isEmpty)
 }
 
 @Test func stopListeningShowsTranscribingThenYourTurn() async throws {
@@ -2163,6 +3721,28 @@ private struct Harness {
         )
         _ = try await session.perform(.typeBrainDump(StoryReply.brainDump))
         return try await session.perform(.generate)
+    }
+
+    func generateTwoSiblingBatch() async throws -> (String, String) {
+        _ = try await session.perform(.typeBrainDump(StoryReply.brainDump))
+        let named = try await session.perform(
+            .nameBatch(name: "Checkout totals", shortLabels: ["scan bin", "export totals"])
+        )
+        let firstId = try #require(named.batch?.siblings[0].id)
+        let secondId = try #require(named.batch?.siblings[1].id)
+        _ = try await session.perform(.generate)
+        await model.replaceReply(
+            GenerateReply(
+                ticketType: .chore,
+                title: ChoreReply.title,
+                shortLabel: "export totals",
+                description: ChoreReply.firstPassDescription,
+                openQuestions: []
+            )
+        )
+        _ = try await session.perform(.focusDraft(secondId))
+        _ = try await session.perform(.generate)
+        return (firstId, secondId)
     }
 
     func writeProject(_ project: Project) throws {

@@ -9,8 +9,17 @@ let package = Package(
         .executable(name: "FakthisApp", targets: ["FakthisApp"]),
         .executable(name: "FakthisPrototype", targets: ["FakthisPrototype"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.6"),
+    ],
     targets: [
-        .target(name: "Fakthis"),
+        .target(
+            name: "Fakthis",
+            dependencies: [
+                .product(name: "FluidAudio", package: "FluidAudio"),
+                "whisper",
+            ]
+        ),
         // The window. macOS app on the Fakthis library; Session is the only state it has.
         .executableTarget(
             name: "FakthisApp",
@@ -27,6 +36,10 @@ let package = Package(
         .testTarget(
             name: "FakthisTests",
             dependencies: ["Fakthis"]
+        ),
+        .binaryTarget(
+            name: "whisper",
+            path: "Vendor/whisper.xcframework"
         ),
     ]
 )

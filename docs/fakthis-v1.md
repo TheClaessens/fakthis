@@ -4,7 +4,7 @@ This is the destination of [Fakthis v1: chart the way to a functional spec](http
 
 **Terms** live in [`CONTEXT.md`](../CONTEXT.md). Use them. Do not rename them.
 
-**Why** lives in [`docs/adr/`](adr/). Do not relitigate an ADR in implementation.
+**Why** lives in [`docs/adr/`](adr/). Do not relitigate an ADR in implementation. Window shape is ADR-0007.
 
 **Detail** of each decision lives on its ticket (linked from the map). This spec is the index of behaviour, not a restatement of every argument.
 
@@ -46,6 +46,16 @@ URLSession to Jira REST. Fakthis owns the agent loop and calls a model by API ke
 
 Packaging, notarization, and how Thomas installs are **not in this spec**. One user; still fog.
 
+### Window
+
+One window, in the Rail shape — rail, bounded Draft column with a fixed footer, conversation column. ADR-0007. Create, Batch and Rewrite are not modes; they are what the left rail holds. The Draft and conversation columns keep their shape across all three, which is why the Draft is designed once.
+
+The Draft column is **bounded with a fixed footer**. Submit and the rewrite diff stay reachable at any window height and any description length.
+
+**Before Generate** there is no rail. The window is the **front door**: one field sized to a spoken dump, Material as chips on the field, and Generate. Submit is **absent**, not disabled. The Ticket type control does not exist. The conversation column does not exist — not even as a collapsed spine. Batch and Rewrite are toolbar buttons until a Draft exists.
+
+Once a Draft exists, the conversation column is **collapsible** (it collapses to a spine). Create and Batch open it for chat. Rewrite opens with it collapsed: Update does not require Generate.
+
 ---
 
 ## 3. Setup and the Project list
@@ -68,7 +78,7 @@ Credentials are **app-level**. A Project is a Jira project key on that site, not
 2. Fakthis calls `createmeta/{project}/issuetypes`, filters on `hierarchyLevel` and `subtask` (not on names), maps Story / Bug / Chore by name where a match exists, else the project’s default standard type. **Show the mapping for override.** Fakthis never creates a Jira issue type. Three Fakthis types on one Jira type is fine.
 3. First Catalog pull. Empty Catalog is a **normal state** (new Jira project, or nothing returned). Generate still runs.
 4. Project terms start **empty**. Biasing stays off while empty.
-5. **One warning:** text Material goes to the model provider (ADR-0001). Repeat the warning the first time text Material is added on a Draft. No redaction pass in v1.
+5. **One warning:** text Material goes to the model provider (ADR-0001). Setup-time only — at Project confirmation. It has no place in the Draft UI. No redaction pass in v1.
 
 ### Project list
 
@@ -128,7 +138,7 @@ ADR-0005. Shallow snapshot, stuffed into the system prompt as the cacheable pref
 - On later open: refresh in the background if the last pull is older than an hour. **Generate is never blocked on a refresh.**
 - After Submit: **insert locally immediately** (JQL is eventually consistent). Pass `reconcileIssues` if a pull happens to run in the same breath; local insert is the source of truth for that moment. Keep short label and Fakthis Ticket type on that row.
 - Manual refresh for tickets written in Jira itself.
-- Unreachable Jira: **serve the last pull.** Never-pulled and unreachable is the empty-Catalog case.
+- Unreachable Jira: **serve the last pull.** Never-pulled and unreachable is the empty-Catalog case. A failed refresh is a Draft signal (§9), never a block.
 
 The Catalog is **not browsable**. It is not a UI.
 
@@ -163,7 +173,7 @@ No voice-activity detection (it cuts a thinking pause; it also makes auto-send f
 
 **Self-corrections stay.** “no wait, actually…” remains in the transcript.
 
-**Status:** a visual strip only — listening / transcribing / agent thinking / your turn. No TTS, no earcon.
+**Status:** a visual strip on **the field receiving the take** — listening / transcribing / agent thinking / your turn. Not a strip spanning the window as an app status bar. No TTS, no earcon.
 
 Same engine both tiers. A two-engine split only if implementation measurement says the short-answer tier fails. Thomas’s accent and short-answer jargon-term recall are unmeasured; bake-off against `.scratch/fakthis/research/03-transcription-engine.md` §5. The engine is a seam; *local, bundled, on the ANE* does not move.
 
@@ -175,9 +185,11 @@ Fakthis ships **no** Project terms. Canned nouns in the throwaway prototype were
 
 One Draft, from empty to a live Ticket.
 
+**Before Generate** the window is the front door: field, Material, Generate — and nothing else. The field is sized to a spoken dump; Material sits as chips **on** the field. **Submit is absent, not disabled.** **The Ticket type control does not exist.** The agent infers type at Generate; a Story/Bug/Chore control over an empty field turns that proposal into a correction.
+
 1. **Brain-dump.** Speak (toggle) or type into the field. Attach Material (drag-drop, paste, file picker). No in-app capture.
-2. **Generate.** Separate press. Agent infers Ticket type, declares it as an editable control (default Story if genuinely ambiguous). Type inference is classification of what the PM said, not Scope invention. Proposes title, short label (three to six words, no “As a”, from the PM’s nouns; else the title’s scope clause — never an invented name), description against the template, open questions.
-3. **Definition of Done:** a **second pass** that reads **only** the finished description. Bullet list, not a tickable Jira checklist. If the PM later hand-edits the description, offer to regenerate the Definition of Done; do not do it silently.
+2. **Generate.** Separate press. On the front door there is nothing else to press. Agent infers Ticket type, declares it as an editable control **inline with the short label** (the two things checked first; default Story if genuinely ambiguous). Type inference is classification of what the PM said, not Scope invention. Proposes title, short label (three to six words, no “As a”, from the PM’s nouns; else the title’s scope clause — never an invented name), description against the template, open questions.
+3. **Definition of Done:** a **second pass** that reads **only** the finished description. Bullet list, not a tickable Jira checklist. If the PM later hand-edits the description, offer to regenerate the Definition of Done; do not do it silently. The offer sits **above** the description — attached to what changed, not orphaned below it — and **re-arms** after a later hand-edit: choosing Keep and then editing again offers it a second time.
 4. **Chat.** Agent asks about missing Scope. Answers: speak (push-to-talk) or type; **Send** is a separate press. Changing Ticket type mid-chat reshapes the Draft against the new template; Material and answers already given stay.
 5. **Review.** The Draft UI is the review. Structural check warns, never blocks, never writes the Jira label. Duplicate interrupt and related list: §10.
 6. **Submit.** Creates the Jira issue immediately, returns the link. No Jira-side draft. Markdown → wiki markup, posted to `/rest/api/2/issue`. Mapped Jira issue type, optional epic (`fields.parent`), completeness marker if questions remain. Then upload media as a retryable step. Then the folder is a queue, then gone. Catalog inserts the shallow row.
@@ -200,6 +212,8 @@ On add of media: read `attachment/meta`. Oversize, disabled, or unsupported: **w
 ## 8. Templates
 
 ADR-0004. Agent emits **Markdown**, never wiki markup. Fakthis converts at Submit.
+
+Once a Draft exists, the Ticket type control sits **inline with the short label** — the two things checked first — not as template chrome. It does not exist before Generate (§7).
 
 **Vocabulary:** paragraphs, bold, bullet list, ordered list, links, one horizontal rule. **No headings.**
 
@@ -225,6 +239,8 @@ Label and section come on **together** when unanswered questions remain, and com
 
 This label is **only** for skipped questions. It never means “the agent malformed its output.”
 
+The open-questions section **is** the warning. It is not additionally a signal row. Listing it again restates what already sits at the foot of the description.
+
 ### Structural check
 
 Deterministic, after Generate (and before Submit):
@@ -237,6 +253,16 @@ Deterministic, after Generate (and before Submit):
 - description fits the field cap (1 MB)
 
 **Warns, never blocks.** Stays inside Fakthis. Never applies `fakthis-open-questions`. Never grades content quality.
+
+### Signals
+
+The signals are not one class.
+
+**Field signals** — the structural check, the Definition of Done regenerate offer — are anchored at the field they concern.
+
+**Draft signals** — a failed Catalog refresh, oversize or disabled Material, failed uploads — rest as gutter marks down the Draft edge. The gutter is the resting state. Expanding it opens a panel that **displaces** rather than covers the Draft; Submit stays reachable. The panel’s height follows its content: a single signal does not open a full-height column, and is legible from the gutter mark without opening the panel.
+
+A duplicate is not a Draft signal row — §10. The open-questions section is not a signal — it is part of the Draft. Nothing in the gutter blocks Submit.
 
 ---
 
@@ -258,7 +284,7 @@ Same unit of work, **same Fakthis Ticket type**. Creating it would split the wor
 
 **When:** after Generate, once title + short label + type exist. Re-run if type or short label changes. Re-run at Submit. Not while they speak.
 
-**UI:** dismissible interrupt — “This looks like FAK-231. Continue, or work on that Ticket instead.” Continue is always legal. Submit is never blocked. A local Draft hit is named by short label.
+**UI:** a **conversation event that leaves a gutter mark**. When it fires it is an interrupt in the conversation — “This looks like FAK-231. Continue, or work on that Ticket instead.” Continuing collapses it to a gutter mark. Never a signal row, never rendered in two places at once. Continue is always legal. Submit is never blocked. A local Draft hit is named by short label.
 
 **Landing:** Jira key → rewrite loop (§12). Local Draft → focus that Draft. Batch sibling → that Draft leaves the Batch first (§11), then rewrite.
 
@@ -280,13 +306,13 @@ Several full Drafts from one brain-dump, named by the **PM**. The agent never pr
 
 1. In the brain-dump, before first Generate.
 2. In chat, after one Draft already exists.
-3. A control that does not go through the agent (minimum two named Drafts).
+3. A control that does not go through the agent (minimum two named Drafts). Before Generate that control is a toolbar button — there is no rail yet.
 
 Reading “that’s three tickets: …” into an editable list is classification, same as type inference. The list is always editable.
 
 ### Screen
 
-List plus one focused Draft. The Batch screen **is** the editor. Sibling list shows short label, Ticket type, epic, position in the `blocks` chain, completeness. Submit sits on the Batch. Chain `A → B → C` is an editable strip on that screen. No gallery.
+The Batch screen **is** the editor: the sibling list **is** the rail, and the Draft and conversation columns do not change. One control per sibling carries short label, Ticket type, epic, chain position and completeness, reordered in place. There is no separate `blocks` strip and no gallery. Submit sits on the Batch.
 
 Chat and voice are with the **focused** Draft only. Each Generate is told: you are Draft *i* of *N*; siblings are these short labels and types; write this one. Sibling list is Context. Scope for each Draft comes from the dump and that Draft’s own chat.
 
@@ -342,7 +368,7 @@ A rewrite is a new Draft bound to the key. The create folder (even as an upload 
 
 ### Material
 
-Live description and comments shown readable next to the editor. Comments: this issue only, newest first, cap 50, say so if truncated. Fakthis **never writes a Jira comment**. Existing attachments stay; v1 does not download them — add a file if the model needs to see it.
+Live description and comments shown readable **beside** the Draft, in the rail — never above it in a scroll. Comments: this issue only, newest first, cap 50, say so if truncated. Fakthis **never writes a Jira comment**. Existing attachments stay; v1 does not download them — add a file if the model needs to see it.
 
 Generate is a separate press. The PM sees the Material first.
 
@@ -359,7 +385,9 @@ Propose a title against that type. One action keeps the live title. Default to t
 
 ### Review and stale Jira
 
-Ordinary Draft UI. At **Update**, a diff against the fetched live body is **visible on that screen** (not hidden). If Jira’s `updated` is newer than the fetch: warn, offer **re-fetch** (Material refreshes, Draft stays) or proceed and clobber. Re-fetch is the default. No auto-merge.
+Ordinary Draft UI. At **Update**, a diff against the fetched live body is **visible on that screen**, at the foot of the Draft column, directly above the button that writes — guaranteed by the bounded column with a fixed footer. If Jira’s `updated` is newer than the fetch: warn, offer **re-fetch** (Material refreshes, Draft stays) or proceed and clobber. Re-fetch is the default. No auto-merge.
+
+Rewrite opens with the conversation column **collapsed**. Update does not require Generate.
 
 Rewrite target excluded from duplicate matching.
 
@@ -475,4 +503,5 @@ Do not add these in the implementation session. They are out of scope for this s
 | Batch | [issue 10](https://github.com/TheClaessens/fakthis/issues/10) |
 | Rewrite | [issue 11](https://github.com/TheClaessens/fakthis/issues/11) |
 | Runtime | ADR-0006 · [issue 12](https://github.com/TheClaessens/fakthis/issues/12) |
+| Window | ADR-0007 · [issue 29](https://github.com/TheClaessens/fakthis/issues/29) · [`Prototype/FINDINGS.md`](../Prototype/FINDINGS.md) |
 | Research | `.scratch/fakthis/research/` |
