@@ -2,6 +2,168 @@ import Foundation
 import Testing
 import Fakthis
 
+@Test func dumpToggleAppendsTheTakeAndGenerateIsASeparatePress() async throws {
+    let harness = Harness()
+    await harness.transcriber.enqueueTake(
+        "we need pickers to scan the bin. no wait, actually the tote"
+    )
+
+    let listening = try await harness.session.perform(.startListening)
+    #expect(listening.status == .listening)
+    #expect(listening.field.isEmpty)
+    #expect(await harness.model.completeRequests.isEmpty)
+
+    let committed = try await harness.session.perform(.stopListening)
+    #expect(committed.status == .yourTurn)
+    #expect(committed.field == "we need pickers to scan the bin. no wait, actually the tote")
+    #expect(await harness.model.completeRequests.isEmpty)
+
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.draft?.title == StoryReply.title)
+    #expect(await harness.model.completeRequests.first?.user == committed.field)
+}
+
+@Test func aSecondDumpTakeAppendsSoTwoTakesAreOneBrainDump() async throws {
+    let harness = Harness()
+    await harness.transcriber.enqueueTake("we need pickers to scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+
+    await harness.transcriber.enqueueTake("no wait, actually the tote")
+    let second = try await harness.session.perform(.startListening)
+    #expect(second.status == .listening)
+    let committed = try await harness.session.perform(.stopListening)
+    #expect(committed.field == "we need pickers to scan the bin no wait, actually the tote")
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
+@Test func chatTakeReplacesTheFieldAndSendIsASeparatePress() async throws {
+    let harness = Harness()
+    let generated = try await harness.generateStory(
+        openQuestions: ["What should happen when the bin scan fails?"]
+    )
+    #expect(generated.field == StoryReply.brainDump)
+    let requestsAfterGenerate = await harness.model.completeRequests.count
+
+    await harness.transcriber.enqueueTake("show a blocking error and do not take items")
+    _ = try await harness.session.perform(.startListening)
+    let committed = try await harness.session.perform(.stopListening)
+    #expect(committed.field == "show a blocking error and do not take items")
+    #expect(await harness.model.completeRequests.count == requestsAfterGenerate)
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .story,
+            title: StoryReply.title,
+            shortLabel: StoryReply.shortLabel,
+            description: "When a **bin** scan fails, the **pick screen** shows a blocking error.",
+            openQuestions: []
+        )
+    )
+    let sent = try await harness.session.perform(.send)
+    #expect(sent.draft?.openQuestions == [])
+    #expect(sent.draft?.description.contains("blocking error") == true)
+    let requests = await harness.model.completeRequests
+    #expect(requests.count == requestsAfterGenerate + 2)
+    #expect(requests[requestsAfterGenerate].user.contains("show a blocking error and do not take items"))
+}
+
+@Test func emptyProjectTermsMeanBiasingIsOffOnTheBatchPass() async throws {
+    let harness = Harness()
+    #expect(harness.project.terms.isEmpty)
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    #expect(await harness.transcriber.transcribeTerms == [[]])
+}
+
+@Test func bothVoiceTiersPassProjectTermsOnTheBatchPass() async throws {
+    let harness = Harness(terms: ["bin", "pick screen"])
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    #expect(await harness.transcriber.transcribeTerms == [["bin", "pick screen"]])
+
+    _ = try await harness.session.perform(.generate)
+    await harness.transcriber.enqueueTake("show a blocking error")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    #expect(await harness.transcriber.transcribeTerms == [
+        ["bin", "pick screen"],
+        ["bin", "pick screen"],
+    ])
+}
+
+@Test func typeOverAfterATakeIsWhatGenerateSends() async throws {
+    let harness = Harness()
+    await harness.transcriber.enqueueTake("scan the bin. no wait, actually the tote")
+    _ = try await harness.session.perform(.startListening)
+    let spoken = try await harness.session.perform(.stopListening)
+    #expect(spoken.field.contains("no wait, actually"))
+
+    let corrected = "pickers must scan the tote before they pick"
+    _ = try await harness.session.perform(.typeBrainDump(corrected))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.field == corrected)
+    #expect(await harness.model.completeRequests.first?.user == corrected)
+}
+
+@Test func generateDoesNotReceiveATakeThePMHasNotSeen() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    await harness.transcriber.enqueueTake("this take was never committed")
+    let listening = try await harness.session.perform(.startListening)
+    #expect(listening.status == .listening)
+    #expect(listening.field == StoryReply.brainDump)
+
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.field == StoryReply.brainDump)
+    #expect(await harness.model.completeRequests.first?.user == StoryReply.brainDump)
+    #expect(await harness.transcriber.transcribeTerms.isEmpty)
+}
+
+@Test func stopListeningShowsTranscribingThenYourTurn() async throws {
+    let harness = Harness()
+    await harness.transcriber.enqueueTake("scan the bin")
+    await harness.transcriber.setHoldTranscribe(true)
+    _ = try await harness.session.perform(.startListening)
+
+    async let stopped = harness.session.perform(.stopListening)
+    try await waitUntil {
+        try await harness.session.state().status == .transcribing
+    }
+    await harness.transcriber.setHoldTranscribe(false)
+    let committed = try await stopped
+    #expect(committed.status == .yourTurn)
+    #expect(committed.field == "scan the bin")
+}
+
+@Test func generateShowsAgentThinkingThenYourTurn() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    await harness.model.setHoldComplete(true)
+
+    async let generated = harness.session.perform(.generate)
+    try await waitUntil {
+        try await harness.session.state().status == .agentThinking
+    }
+    await harness.model.setHoldComplete(false)
+    let done = try await generated
+    #expect(done.status == .yourTurn)
+    #expect(done.draft?.title == StoryReply.title)
+}
+
+@Test func aFailedTakeLeavesTheFieldAndReturnsToYourTurn() async throws {
+    let harness = Harness()
+    await harness.transcriber.enqueueTake("this must not land")
+    await harness.transcriber.setFailTranscribe(true)
+    _ = try await harness.session.perform(.startListening)
+    let failed = try await harness.session.perform(.stopListening)
+    #expect(failed.status == .yourTurn)
+    #expect(failed.field.isEmpty)
+    #expect(await harness.model.completeRequests.isEmpty)
+}
+
 @Test func firstLaunchShowsANECompileInProgressUntilItIsDone() async throws {
     let harness = Harness(seedProject: false, compileFinished: false)
     let compiling = try await harness.session.state()

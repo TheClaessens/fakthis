@@ -9,6 +9,11 @@ struct ModelCompleteRequest: Equatable, Sendable {
 
 actor FakeTranscriber: Transcriber {
     private var compileFinished: Bool
+    private var takes: [String] = []
+    private(set) var transcribeTerms: [[String]] = []
+    private var holdTranscribe = false
+    private var transcribeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var failTranscribe = false
 
     init(compileFinished: Bool) {
         self.compileFinished = compileFinished
@@ -18,8 +23,34 @@ actor FakeTranscriber: Transcriber {
         compileFinished = true
     }
 
+    func enqueueTake(_ text: String) {
+        takes.append(text)
+    }
+
+    func setHoldTranscribe(_ value: Bool) {
+        holdTranscribe = value
+        guard !value else { return }
+        let waiters = transcribeWaiters
+        transcribeWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+
+    func setFailTranscribe(_ value: Bool) {
+        failTranscribe = value
+    }
+
     func compileStatus() async -> CompileStatus {
         compileFinished ? .done : .inProgress
+    }
+
+    func transcribe(terms: [String]) async throws -> String {
+        transcribeTerms.append(terms)
+        if failTranscribe { throw TranscribeFailed() }
+        if holdTranscribe {
+            await withCheckedContinuation { transcribeWaiters.append($0) }
+        }
+        guard !takes.isEmpty else { return "" }
+        return takes.removeFirst()
     }
 }
 
@@ -53,6 +84,8 @@ actor ScriptedModel: Model {
     private(set) var completeRequests: [ModelCompleteRequest] = []
     private var awaitingDefinitionOfDone = false
     private var rawReply: String?
+    private var holdComplete = false
+    private var completeWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(reply: GenerateReply, definitionOfDone: [String]) {
         self.reply = reply
@@ -72,8 +105,19 @@ actor ScriptedModel: Model {
         failGenerate = value
     }
 
+    func setHoldComplete(_ value: Bool) {
+        holdComplete = value
+        guard !value else { return }
+        let waiters = completeWaiters
+        completeWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+
     func complete(system: String, user: String, screenshots: [Material]) async throws -> String {
         if failGenerate { throw ModelFailed() }
+        if holdComplete {
+            await withCheckedContinuation { completeWaiters.append($0) }
+        }
         completeRequests.append(
             ModelCompleteRequest(system: system, user: user, screenshots: screenshots)
         )

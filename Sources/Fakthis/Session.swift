@@ -18,6 +18,15 @@ public actor Session {
         case dismissDuplicate
         case workOnDuplicate
         case tickRelated(TicketKey)
+        case startListening
+        case stopListening
+    }
+
+    public enum Status: Equatable, Sendable {
+        case listening
+        case transcribing
+        case agentThinking
+        case yourTurn
     }
 
     public struct State: Equatable, Sendable {
@@ -34,6 +43,7 @@ public actor Session {
         public var structuralWarnings: [String]
         public var duplicateInterrupt: DuplicateHit?
         public var related: [RelatedHit]
+        public var status: Status
     }
 
     private var project: Project?
@@ -57,6 +67,7 @@ public actor Session {
     private var failedUploads: [String] = []
     private var duplicateInterrupt: DuplicateHit?
     private var related: [RelatedHit] = []
+    private var status: Status = .yourTurn
 
     public init(
         applicationSupport: URL,
@@ -122,6 +133,12 @@ public actor Session {
             try workOnDuplicate()
         case .tickRelated(let key):
             tickRelated(key)
+        case .startListening:
+            startBackgroundRefreshIfStale()
+            startListening()
+        case .stopListening:
+            startBackgroundRefreshIfStale()
+            try await stopListening()
         }
         return snapshot()
     }
@@ -389,6 +406,31 @@ public actor Session {
         try persistMaterial()
     }
 
+    private func startListening() {
+        guard project != nil, !aneCompileInProgress, status != .listening else { return }
+        status = .listening
+    }
+
+    private func stopListening() async throws {
+        guard status == .listening else { return }
+        status = .transcribing
+        defer { status = .yourTurn }
+        do {
+            commitTake(try await transcriber.transcribe(terms: project?.terms ?? []))
+        } catch is TranscribeFailed {
+            return
+        }
+    }
+
+    private func commitTake(_ take: String) {
+        if let draft, draft.key == nil {
+            field = take
+            return
+        }
+        let trimmed = field.trimmingCharacters(in: .whitespacesAndNewlines)
+        field = trimmed.isEmpty ? take : trimmed + " " + take
+    }
+
     private func generate() async throws {
         if draft?.key != nil { return }
         guard project != nil else { return }
@@ -491,6 +533,8 @@ public actor Session {
         ticketType: TicketType? = nil
     ) async throws {
         guard let project else { return }
+        status = .agentThinking
+        defer { status = .yourTurn }
         let generated: GenerateReply
         let done: [String]
         do {
@@ -970,7 +1014,8 @@ public actor Session {
             failedUploads: failedUploads,
             structuralWarnings: draft.map(structuralWarnings(for:)) ?? [],
             duplicateInterrupt: duplicateInterrupt,
-            related: related
+            related: related,
+            status: status
         )
     }
 }

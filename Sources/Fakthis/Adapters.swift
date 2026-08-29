@@ -6,6 +6,7 @@ public protocol Model: Sendable {
 
 public protocol Transcriber: Sendable {
     func compileStatus() async -> CompileStatus
+    func transcribe(terms: [String]) async throws -> String
 }
 
 public enum CompileStatus: Sendable {
@@ -113,6 +114,10 @@ public struct JiraUnreachable: Error {
 }
 
 public struct ModelFailed: Error {
+    public init() {}
+}
+
+public struct TranscribeFailed: Error {
     public init() {}
 }
 
