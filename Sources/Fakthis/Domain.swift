@@ -111,6 +111,23 @@ public struct CatalogRow: Equatable, Sendable, Codable {
     }
 }
 
+public struct Material: Equatable, Sendable {
+    public var filename: String
+    public var mimeType: String
+    public var data: Data
+
+    public init(filename: String, mimeType: String, data: Data) {
+        self.filename = filename
+        self.mimeType = mimeType
+        self.data = data
+    }
+
+    public var isText: Bool { mimeType.hasPrefix("text/") }
+    public var isScreenshot: Bool { mimeType.hasPrefix("image/") }
+    public var isVideo: Bool { mimeType.hasPrefix("video/") }
+    public var isMedia: Bool { isScreenshot || isVideo }
+}
+
 public struct Draft: Equatable, Sendable {
     public var id: String
     public var ticketType: TicketType

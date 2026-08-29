@@ -4,6 +4,7 @@ import Fakthis
 struct ModelCompleteRequest: Equatable, Sendable {
     var system: String
     var user: String
+    var screenshots: [Material]
 }
 
 actor FakeTranscriber: Transcriber {
@@ -65,9 +66,11 @@ actor ScriptedModel: Model {
         failGenerate = value
     }
 
-    func complete(system: String, user: String) async throws -> String {
+    func complete(system: String, user: String, screenshots: [Material]) async throws -> String {
         if failGenerate { throw ModelFailed() }
-        completeRequests.append(ModelCompleteRequest(system: system, user: user))
+        completeRequests.append(
+            ModelCompleteRequest(system: system, user: user, screenshots: screenshots)
+        )
         if awaitingDefinitionOfDone {
             awaitingDefinitionOfDone = false
             return try jsonString(definitionOfDone)
@@ -81,6 +84,13 @@ private func jsonString<T: Encodable>(_ value: T) throws -> String {
     let data = try JSONEncoder().encode(value)
     guard let text = String(data: data, encoding: .utf8) else { throw ModelFailed() }
     return text
+}
+
+struct UploadedAttachment: Equatable, Sendable {
+    var key: TicketKey
+    var filename: String
+    var mimeType: String
+    var data: Data
 }
 
 struct CreatedTicket: Equatable, Sendable {
@@ -111,15 +121,18 @@ struct SeededIssue: Sendable {
 
 actor FakeJira: Jira {
     var unreachable = false
+    var failUploads = false
     var nextKey = TicketKey("FAK-1")
     private(set) var created: [CreatedTicket] = []
     private(set) var catalogPulls: [String] = []
+    private(set) var uploaded: [UploadedAttachment] = []
     private(set) var attachmentPolicyCalls = 0
-    private(set) var uploadAttachmentCalls = 0
+    var uploadAttachmentCalls: Int { uploaded.count }
     private var seededEpics: [SeededEpic] = []
     private var seededIssues: [SeededIssue] = []
     private var seededComponentNames: [String] = []
     private var seededIssueTypes: [JiraIssueType] = []
+    private var policy = AttachmentPolicy(enabled: true, uploadLimit: 10_485_760)
 
     private var holdPulls = false
     private var pullWaiters: [CheckedContinuation<Void, Never>] = []
@@ -157,7 +170,7 @@ actor FakeJira: Jira {
     func attachmentPolicy() async throws -> AttachmentPolicy {
         attachmentPolicyCalls += 1
         if unreachable { throw JiraUnreachable() }
-        return AttachmentPolicy(enabled: true, uploadLimit: 10_485_760)
+        return policy
     }
 
     func uploadAttachment(
@@ -166,8 +179,11 @@ actor FakeJira: Jira {
         mimeType: String,
         data: Data
     ) async throws {
-        uploadAttachmentCalls += 1
         if unreachable { throw JiraUnreachable() }
+        if failUploads { throw JiraUnreachable() }
+        uploaded.append(
+            UploadedAttachment(key: key, filename: filename, mimeType: mimeType, data: data)
+        )
     }
 
     func fetchIssueTypes(projectKey: String) async throws -> [JiraIssueType] {
@@ -229,12 +245,20 @@ actor FakeJira: Jira {
         seededIssueTypes = types
     }
 
+    func setAttachmentPolicy(_ policy: AttachmentPolicy) {
+        self.policy = policy
+    }
+
     func setHoldPulls(_ value: Bool) {
         holdPulls = value
         guard !value else { return }
         let waiters = pullWaiters
         pullWaiters = []
         waiters.forEach { $0.resume() }
+    }
+
+    func setFailUploads(_ value: Bool) {
+        failUploads = value
     }
 
     func setUnreachable(_ value: Bool) {

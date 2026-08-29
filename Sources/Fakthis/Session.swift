@@ -5,9 +5,12 @@ private let catalogStaleAfter: TimeInterval = 60 * 60
 public actor Session {
     public enum Intent: Sendable {
         case typeBrainDump(String)
+        case attachMaterial(Material)
         case generate
         case send
         case submit
+        case retryUploads
+        case skipFailedUploads
         case saveCredentials(Settings, jiraToken: String, modelKey: String)
         case enterProjectKey(String)
         case confirmProject(mapping: [TicketType: String])
@@ -22,6 +25,8 @@ public actor Session {
         public var project: Project?
         public var proposedProject: ProposedProject?
         public var textMaterialWarning: String?
+        public var materialWarnings: [String]
+        public var failedUploads: [String]
         public var structuralWarnings: [String]
     }
 
@@ -34,11 +39,16 @@ public actor Session {
 
     private var field = ""
     private var draft: Draft?
+    private var draftId: String?
+    private var material: [Material] = []
+    private var blockedUploads: Set<String> = []
     private var catalog = Catalog()
     private var aneCompileInProgress = true
     private var settings: Settings?
     private var proposedProject: ProposedProject?
     private var textMaterialWarning: String?
+    private var materialWarnings: [String] = []
+    private var failedUploads: [String] = []
 
     public init(
         applicationSupport: URL,
@@ -66,6 +76,9 @@ public actor Session {
         case .typeBrainDump(let text):
             startBackgroundRefreshIfStale()
             field = text
+        case .attachMaterial(let item):
+            startBackgroundRefreshIfStale()
+            try await attach(item)
         case .generate:
             try await pullCatalogIfNeverPulled()
             startBackgroundRefreshIfStale()
@@ -76,6 +89,12 @@ public actor Session {
         case .submit:
             startBackgroundRefreshIfStale()
             try await submit()
+        case .retryUploads:
+            startBackgroundRefreshIfStale()
+            try await retryUploads()
+        case .skipFailedUploads:
+            startBackgroundRefreshIfStale()
+            try skipFailedUploads()
         case .saveCredentials(let settings, let jiraToken, let modelKey):
             try await saveCredentials(
                 settings: settings,
@@ -188,6 +207,70 @@ public actor Session {
         )
         try persistDraft()
         try persistCatalog()
+        await uploadPending(key: key)
+        if !failedUploads.isEmpty {
+            try persistDraft()
+        }
+    }
+
+    private func uploadPending(key: TicketKey) async {
+        failedUploads = []
+        for item in material where item.isMedia && !blockedUploads.contains(item.filename) {
+            do {
+                try await upload(item, key: key)
+            } catch {
+                failedUploads.append(item.filename)
+            }
+        }
+        try? deleteDraftFolderIfUploadsFinished()
+    }
+
+    private func upload(_ item: Material, key: TicketKey) async throws {
+        try await jira.uploadAttachment(
+            key: key,
+            filename: item.filename,
+            mimeType: item.mimeType,
+            data: item.data
+        )
+    }
+
+    private func retryUploads() async throws {
+        guard let key = draft?.key else { return }
+        var stillFailed: [String] = []
+        for filename in failedUploads {
+            guard let item = material.first(where: { $0.filename == filename }) else { continue }
+            do {
+                try await upload(item, key: key)
+            } catch {
+                stillFailed.append(filename)
+            }
+        }
+        failedUploads = stillFailed
+        try persistDraft()
+        try deleteDraftFolderIfUploadsFinished()
+    }
+
+    private func skipFailedUploads() throws {
+        guard !failedUploads.isEmpty else { return }
+        failedUploads = []
+        try deleteDraftFolder()
+    }
+
+    private func deleteDraftFolderIfUploadsFinished() throws {
+        guard failedUploads.isEmpty else { return }
+        try deleteDraftFolder()
+    }
+
+    private func deleteDraftFolder() throws {
+        guard let folder = draftFolderURL(),
+            FileManager.default.fileExists(atPath: folder.path)
+        else { return }
+        try FileManager.default.removeItem(at: folder)
+    }
+
+    private func draftFolderURL() -> URL? {
+        guard let id = draft?.id ?? draftId else { return nil }
+        return draftsRoot()?.appending(component: id)
     }
 
     private var catalogLoaded = false
@@ -259,10 +342,53 @@ public actor Session {
         var catalog: Catalog
     }
 
+    private func attach(_ item: Material) async throws {
+        guard project != nil else { return }
+        if item.isText {
+            textMaterialWarning = "Text Material is sent to the model provider."
+        }
+        if item.isMedia {
+            do {
+                let policy = try await jira.attachmentPolicy()
+                if !policy.enabled {
+                    materialWarnings.append("attachments are disabled")
+                    blockedUploads.insert(item.filename)
+                } else if item.data.count > policy.uploadLimit {
+                    materialWarnings.append("\(item.filename) is oversize")
+                    blockedUploads.insert(item.filename)
+                }
+            } catch {
+                materialWarnings.append("could not read attachment policy")
+            }
+        } else if !item.isText {
+            materialWarnings.append("\(item.filename) is unsupported")
+            blockedUploads.insert(item.filename)
+        }
+        if draftId == nil {
+            draftId = draft?.id ?? UUID().uuidString
+        }
+        material.append(item)
+        try persistMaterial()
+    }
+
     private func generate() async throws {
         if draft?.key != nil { return }
         guard project != nil else { return }
-        try await reviseDraft(user: field, instruction: draftJSONInstruction)
+        try await reviseDraft(
+            user: generateUserMessage(),
+            instruction: draftJSONInstruction,
+            screenshots: material.filter(\.isScreenshot)
+        )
+    }
+
+    private func generateUserMessage() -> String {
+        let texts = material.filter(\.isText)
+        guard !texts.isEmpty else { return field }
+        let blocks = texts.map { item in
+            let body = String(data: item.data, encoding: .utf8) ?? ""
+            return "\(item.filename)\n\(body)"
+        }
+        return ([field] + blocks).joined(separator: "\n\n")
     }
 
     private func send() async throws {
@@ -280,11 +406,14 @@ public actor Session {
                 Open questions:
                 \(questions)
                 """,
-            instruction: sendInstruction
+            instruction: sendInstruction,
+            screenshots: []
         )
     }
 
-    private func reviseDraft(user: String, instruction: String) async throws {
+    private func reviseDraft(user: String, instruction: String, screenshots: [Material])
+        async throws
+    {
         guard let project else { return }
         let generated: GenerateReply
         let done: [String]
@@ -293,7 +422,8 @@ public actor Session {
             generated = try decodeJSON(
                 try await model.complete(
                     system: systemPrompt(prefix: prefix, instruction: instruction),
-                    user: user
+                    user: user,
+                    screenshots: screenshots
                 )
             )
             done = try decodeJSON(
@@ -302,7 +432,8 @@ public actor Session {
                         prefix: prefix,
                         instruction: definitionOfDoneInstruction
                     ),
-                    user: generated.description
+                    user: generated.description,
+                    screenshots: []
                 )
             )
         } catch is ModelFailed {
@@ -318,8 +449,10 @@ public actor Session {
 
             \(bullets)
             """
+        let id = draft?.id ?? draftId ?? UUID().uuidString
+        draftId = id
         draft = Draft(
-            id: draft?.id ?? UUID().uuidString,
+            id: id,
             ticketType: generated.ticketType,
             title: generated.title,
             shortLabel: generated.shortLabel,
@@ -327,13 +460,21 @@ public actor Session {
             openQuestions: generated.openQuestions
         )
         try persistDraft()
+        try persistMaterial()
         try persistTranscript()
     }
 
     private func loadDraftIfMissing() throws {
         if draft != nil { return }
         guard project != nil else { return }
-        draft = try loadInProgressDraft()
+        if let stored = try loadStoredDraft() {
+            draft = stored.draft
+            draftId = stored.draft.id
+            material = try loadMaterial()
+            failedUploads = stored.failedUploads
+            return
+        }
+        try loadPendingMaterial()
     }
 
     private var projectLoaded = false
@@ -386,7 +527,7 @@ public actor Session {
         )
     }
 
-    private func loadInProgressDraft() throws -> Draft? {
+    private func loadStoredDraft() throws -> StoredDraft? {
         guard let root = draftsRoot(),
             FileManager.default.fileExists(atPath: root.path)
         else { return nil }
@@ -396,27 +537,104 @@ public actor Session {
             options: [.skipsHiddenFiles]
         )
 
+        var queue: StoredDraft?
         for folder in folders {
             guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             else { continue }
             let sidecarURL = folder.appending(component: "draft.json")
             guard FileManager.default.fileExists(atPath: sidecarURL.path) else { continue }
             let sidecar = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarURL))
-            if sidecar.key != nil { continue }
             let description = try String(
                 contentsOf: folder.appending(component: "description.md"),
                 encoding: .utf8
             )
-            return Draft(
-                id: folder.lastPathComponent,
-                ticketType: sidecar.ticketType,
-                title: sidecar.title,
-                shortLabel: sidecar.shortLabel,
-                description: description,
-                openQuestions: sidecar.openQuestions
+            let stored = StoredDraft(
+                draft: Draft(
+                    id: folder.lastPathComponent,
+                    ticketType: sidecar.ticketType,
+                    title: sidecar.title,
+                    shortLabel: sidecar.shortLabel,
+                    description: description,
+                    openQuestions: sidecar.openQuestions,
+                    key: sidecar.key.map(TicketKey.init)
+                ),
+                failedUploads: sidecar.failedUploads
+            )
+            if sidecar.key == nil {
+                return stored
+            }
+            if queue == nil {
+                queue = stored
+            }
+        }
+        return queue
+    }
+
+    private func loadPendingMaterial() throws {
+        guard material.isEmpty, let root = draftsRoot(),
+            FileManager.default.fileExists(atPath: root.path)
+        else { return }
+        let folders = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        for folder in folders {
+            guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            else { continue }
+            if FileManager.default.fileExists(
+                atPath: folder.appending(component: "draft.json").path
+            ) {
+                continue
+            }
+            draftId = folder.lastPathComponent
+            material = try loadMaterial()
+            if !material.isEmpty { return }
+            draftId = nil
+        }
+    }
+
+    private func persistMaterial() throws {
+        guard let folder = draftFolderURL(), !material.isEmpty else { return }
+        let materialFolder = folder.appending(component: "material")
+        try FileManager.default.createDirectory(
+            at: materialFolder,
+            withIntermediateDirectories: true
+        )
+        for item in material {
+            try item.data.write(to: materialFolder.appending(component: item.filename))
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let index = material.map {
+            MaterialRecord(
+                filename: $0.filename,
+                mimeType: $0.mimeType,
+                blockedFromUpload: blockedUploads.contains($0.filename)
             )
         }
-        return nil
+        try encoder.encode(index).write(to: materialFolder.appending(component: "index.json"))
+    }
+
+    private func loadMaterial() throws -> [Material] {
+        guard let folder = draftFolderURL() else { return [] }
+        let materialFolder = folder.appending(component: "material")
+        let indexURL = materialFolder.appending(component: "index.json")
+        guard FileManager.default.fileExists(atPath: indexURL.path) else { return [] }
+        let records = try JSONDecoder().decode(
+            [MaterialRecord].self,
+            from: Data(contentsOf: indexURL)
+        )
+        return try records.map { record in
+            if record.blockedFromUpload {
+                blockedUploads.insert(record.filename)
+            }
+            return Material(
+                filename: record.filename,
+                mimeType: record.mimeType,
+                data: try Data(contentsOf: materialFolder.appending(component: record.filename))
+            )
+        }
     }
 
     private func persistDraft() throws {
@@ -429,7 +647,8 @@ public actor Session {
             title: draft.title,
             shortLabel: draft.shortLabel,
             openQuestions: draft.openQuestions,
-            key: draft.key?.value
+            key: draft.key?.value,
+            failedUploads: failedUploads
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -469,12 +688,72 @@ public actor Session {
         var terms: [String]
     }
 
+    private struct StoredDraft {
+        var draft: Draft
+        var failedUploads: [String]
+    }
+
+    private struct MaterialRecord: Codable {
+        var filename: String
+        var mimeType: String
+        var blockedFromUpload: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case filename, mimeType, blockedFromUpload
+        }
+
+        init(filename: String, mimeType: String, blockedFromUpload: Bool) {
+            self.filename = filename
+            self.mimeType = mimeType
+            self.blockedFromUpload = blockedFromUpload
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            filename = try container.decode(String.self, forKey: .filename)
+            mimeType = try container.decode(String.self, forKey: .mimeType)
+            blockedFromUpload =
+                try container.decodeIfPresent(Bool.self, forKey: .blockedFromUpload) ?? false
+        }
+    }
+
     private struct Sidecar: Codable {
         var ticketType: TicketType
         var title: String
         var shortLabel: String
         var openQuestions: [String]
         var key: String?
+        var failedUploads: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case ticketType, title, shortLabel, openQuestions, key, failedUploads
+        }
+
+        init(
+            ticketType: TicketType,
+            title: String,
+            shortLabel: String,
+            openQuestions: [String],
+            key: String?,
+            failedUploads: [String]
+        ) {
+            self.ticketType = ticketType
+            self.title = title
+            self.shortLabel = shortLabel
+            self.openQuestions = openQuestions
+            self.key = key
+            self.failedUploads = failedUploads
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            ticketType = try container.decode(TicketType.self, forKey: .ticketType)
+            title = try container.decode(String.self, forKey: .title)
+            shortLabel = try container.decode(String.self, forKey: .shortLabel)
+            openQuestions = try container.decode([String].self, forKey: .openQuestions)
+            key = try container.decodeIfPresent(String.self, forKey: .key)
+            failedUploads = try container.decodeIfPresent([String].self, forKey: .failedUploads) ?? []
+        }
     }
 
     private struct TranscriptLine: Codable {
@@ -533,6 +812,8 @@ public actor Session {
             project: project,
             proposedProject: proposedProject,
             textMaterialWarning: textMaterialWarning,
+            materialWarnings: materialWarnings,
+            failedUploads: failedUploads,
             structuralWarnings: draft.map(structuralCheck) ?? []
         )
     }

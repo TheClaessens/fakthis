@@ -15,7 +15,8 @@ import Fakthis
 
     let text = try await model.complete(
         system: "Catalog\nProject terms:\nbin",
-        user: "we need pickers to scan the bin"
+        user: "we need pickers to scan the bin",
+        screenshots: []
     )
 
     #expect(text == #"{"ok":true}"#)
@@ -33,6 +34,38 @@ import Fakthis
     ])
 }
 
+@Test func modelHTTPCompleteSendsScreenshotsAsImageParts() async throws {
+    let http = ScriptedHTTP()
+    await http.queue(
+        status: 200,
+        json: try chatCompletionJSON(content: #"{"ok":true}"#)
+    )
+    let model = ModelHTTP(
+        apiKey: { "test-model-key" },
+        send: { try await http.send($0) }
+    )
+    let png = Data("png-bytes".utf8)
+
+    _ = try await model.complete(
+        system: "rules",
+        user: "scan the bin",
+        screenshots: [
+            Material(filename: "pick.png", mimeType: "image/png", data: png)
+        ]
+    )
+
+    let json = try requestJSON(try #require(await http.requests.last))
+    let messages = try #require(json["messages"] as? [[String: Any]])
+    #expect(messages[0]["content"] as? String == "rules")
+    let userContent = try #require(messages[1]["content"] as? [[String: Any]])
+    #expect(userContent[0]["type"] as? String == "text")
+    #expect(userContent[0]["text"] as? String == "scan the bin")
+    #expect(userContent[1]["type"] as? String == "image_url")
+    let imageURL = try #require((userContent[1]["image_url"] as? [String: String])?["url"])
+    #expect(imageURL.hasPrefix("data:image/png;base64,"))
+    #expect(imageURL.hasSuffix(png.base64EncodedString()))
+}
+
 @Test func modelHTTPFailsWhenTheAPIKeyCannotBeRead() async throws {
     struct MissingKey: Error {}
     let http = ScriptedHTTP()
@@ -42,7 +75,7 @@ import Fakthis
     )
 
     await #expect(throws: ModelFailed.self) {
-        try await model.complete(system: "prefix", user: "dump")
+        try await model.complete(system: "prefix", user: "dump", screenshots: [])
     }
     #expect(await http.requests.isEmpty)
 }
@@ -53,7 +86,7 @@ import Fakthis
         send: { _ in throw URLError(.cannotFindHost) }
     )
     await #expect(throws: ModelFailed.self) {
-        try await model.complete(system: "prefix", user: "dump")
+        try await model.complete(system: "prefix", user: "dump", screenshots: [])
     }
 }
 

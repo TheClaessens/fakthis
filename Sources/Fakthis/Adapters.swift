@@ -1,7 +1,7 @@
 import Foundation
 
 public protocol Model: Sendable {
-    func complete(system: String, user: String) async throws -> String
+    func complete(system: String, user: String, screenshots: [Material]) async throws -> String
 }
 
 public protocol Transcriber: Sendable {

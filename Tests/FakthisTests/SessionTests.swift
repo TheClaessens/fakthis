@@ -253,6 +253,361 @@ import Fakthis
     #expect(await harness.jira.uploadAttachmentCalls == 0)
 }
 
+@Test func textMaterialGoesToGenerateAndIsNeverAJiraAttachment() async throws {
+    let harness = Harness()
+    let email = "From: client@acme.com\nWe need pickers to scan the bin before they pick."
+    let attached = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "client-email.txt",
+                mimeType: "text/plain",
+                data: Data(email.utf8)
+            )
+        )
+    )
+    #expect(attached.textMaterialWarning == "Text Material is sent to the model provider.")
+    #expect(await harness.jira.attachmentPolicyCalls == 0)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    let onDisk = try String(
+        contentsOf: harness.draftFolder(id: draft.id)
+            .appending(component: "material")
+            .appending(component: "client-email.txt"),
+        encoding: .utf8
+    )
+    #expect(onDisk == email)
+
+    let requests = await harness.model.completeRequests
+    #expect(requests[0].user.contains(StoryReply.brainDump))
+    #expect(requests[0].user.contains(email))
+    #expect(requests[0].user.contains("client-email.txt"))
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.uploadAttachmentCalls == 0)
+    #expect(await harness.jira.created.count == 1)
+    #expect(
+        !FileManager.default.fileExists(
+            atPath: harness.draftFolder(id: try #require(submitted.draft?.id)).path
+        )
+    )
+}
+
+@Test func screenshotsGoToGenerateAndUploadAfterTheTicketExists() async throws {
+    let harness = Harness()
+    let png = Data("fake-png-bytes".utf8)
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: png)
+        )
+    )
+    #expect(await harness.jira.attachmentPolicyCalls == 1)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    let onDisk = try Data(
+        contentsOf: harness.draftFolder(id: draft.id)
+            .appending(component: "material")
+            .appending(component: "pick.png")
+    )
+    #expect(onDisk == png)
+
+    let generateRequest = try #require(await harness.model.completeRequests.first)
+    #expect(generateRequest.user == StoryReply.brainDump)
+    #expect(generateRequest.screenshots.map(\.filename) == ["pick.png"])
+    #expect(generateRequest.screenshots.first?.mimeType == "image/png")
+    #expect(generateRequest.screenshots.first?.data == png)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    let uploads = await harness.jira.uploaded
+    #expect(uploads.count == 1)
+    #expect(uploads[0].key == TicketKey("FAK-1"))
+    #expect(uploads[0].filename == "pick.png")
+    #expect(uploads[0].mimeType == "image/png")
+    #expect(uploads[0].data == png)
+    #expect(
+        !FileManager.default.fileExists(
+            atPath: harness.draftFolder(id: try #require(submitted.draft?.id)).path
+        )
+    )
+}
+
+@Test func videoDoesNotGoToTheModelAndUploadsAfterTheTicketExists() async throws {
+    let harness = Harness()
+    let video = Data("fake-mp4-bytes".utf8)
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "repro.mp4", mimeType: "video/mp4", data: video)
+        )
+    )
+    #expect(await harness.jira.attachmentPolicyCalls == 1)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    let onDisk = try Data(
+        contentsOf: harness.draftFolder(id: draft.id)
+            .appending(component: "material")
+            .appending(component: "repro.mp4")
+    )
+    #expect(onDisk == video)
+
+    let generateRequest = try #require(await harness.model.completeRequests.first)
+    #expect(generateRequest.user == StoryReply.brainDump)
+    #expect(generateRequest.screenshots.isEmpty)
+    #expect(!generateRequest.user.contains("fake-mp4-bytes"))
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    let uploads = await harness.jira.uploaded
+    #expect(uploads.count == 1)
+    #expect(uploads[0].key == TicketKey("FAK-1"))
+    #expect(uploads[0].filename == "repro.mp4")
+    #expect(uploads[0].mimeType == "video/mp4")
+    #expect(uploads[0].data == video)
+}
+
+@Test func oversizeMediaWarnsKeepsTheFileAndDoesNotBlockGenerateOrSubmit() async throws {
+    let harness = Harness()
+    await harness.jira.setAttachmentPolicy(AttachmentPolicy(enabled: true, uploadLimit: 10))
+    let png = Data("this-screenshot-is-oversize".utf8)
+    let attached = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: png)
+        )
+    )
+    #expect(attached.materialWarnings == ["pick.png is oversize"])
+    #expect(await harness.jira.attachmentPolicyCalls == 1)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.title == StoryReply.title)
+    let onDisk = try Data(
+        contentsOf: harness.draftFolder(id: draft.id)
+            .appending(component: "material")
+            .appending(component: "pick.png")
+    )
+    #expect(onDisk == png)
+    #expect(await harness.model.completeRequests.first?.screenshots.first?.data == png)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.uploaded.isEmpty)
+}
+
+@Test func restartStillSkipsOversizeMediaOnSubmit() async throws {
+    let harness = Harness()
+    await harness.jira.setAttachmentPolicy(AttachmentPolicy(enabled: true, uploadLimit: 10))
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "pick.png",
+                mimeType: "image/png",
+                data: Data("this-screenshot-is-oversize".utf8)
+            )
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+
+    let restarted = harness.reopen()
+    let submitted = try await restarted.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.uploaded.isEmpty)
+}
+
+@Test func disabledAttachmentsWarnKeepTheFileAndDoNotBlockGenerateOrSubmit() async throws {
+    let harness = Harness()
+    await harness.jira.setAttachmentPolicy(AttachmentPolicy(enabled: false, uploadLimit: 10_485_760))
+    let png = Data("png-bytes".utf8)
+    let attached = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: png)
+        )
+    )
+    #expect(attached.materialWarnings == ["attachments are disabled"])
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.title == StoryReply.title)
+    #expect(
+        FileManager.default.fileExists(
+            atPath: harness.draftFolder(id: draft.id)
+                .appending(component: "material")
+                .appending(component: "pick.png")
+                .path
+        )
+    )
+    #expect(await harness.model.completeRequests.first?.screenshots.map(\.filename) == ["pick.png"])
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.uploaded.isEmpty)
+}
+
+@Test func unsupportedMaterialWarnsKeepsTheFileAndDoesNotBlockGenerateOrSubmit() async throws {
+    let harness = Harness()
+    let pdf = Data("%PDF-fake".utf8)
+    let attached = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "notes.pdf", mimeType: "application/pdf", data: pdf)
+        )
+    )
+    #expect(attached.materialWarnings == ["notes.pdf is unsupported"])
+    #expect(await harness.jira.attachmentPolicyCalls == 0)
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draft = try #require(generated.draft)
+    #expect(draft.title == StoryReply.title)
+    let onDisk = try Data(
+        contentsOf: harness.draftFolder(id: draft.id)
+            .appending(component: "material")
+            .appending(component: "notes.pdf")
+    )
+    #expect(onDisk == pdf)
+    #expect(await harness.model.completeRequests.first?.screenshots.isEmpty == true)
+    #expect(await harness.model.completeRequests.first?.user == StoryReply.brainDump)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.uploaded.isEmpty)
+}
+
+@Test func failedMediaUploadLeavesTheQueueAndRetryDeletesTheFolder() async throws {
+    let harness = Harness()
+    let png = Data("png-bytes".utf8)
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: png)
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let draftId = try #require(generated.draft?.id)
+    let folder = harness.draftFolder(id: draftId)
+
+    await harness.jira.setFailUploads(true)
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.created.count == 1)
+    #expect(await harness.jira.uploaded.isEmpty)
+    #expect(submitted.failedUploads == ["pick.png"])
+    #expect(FileManager.default.fileExists(atPath: folder.path))
+    let sidecar = try JSONDecoder().decode(
+        DiskSidecar.self,
+        from: Data(contentsOf: folder.appending(component: "draft.json"))
+    )
+    #expect(sidecar.key == "FAK-1")
+
+    await harness.jira.setFailUploads(false)
+    let retried = try await harness.session.perform(.retryUploads)
+    #expect(retried.failedUploads.isEmpty)
+    let uploads = await harness.jira.uploaded
+    #expect(uploads.count == 1)
+    #expect(uploads[0].filename == "pick.png")
+    #expect(uploads[0].data == png)
+    #expect(!FileManager.default.fileExists(atPath: folder.path))
+}
+
+@Test func skippingFailedUploadsDeletesTheDraftFolder() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "repro.mp4", mimeType: "video/mp4", data: Data("vid".utf8))
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let folder = harness.draftFolder(id: try #require(generated.draft?.id))
+
+    await harness.jira.setFailUploads(true)
+    _ = try await harness.session.perform(.submit)
+    let skipped = try await harness.session.perform(.skipFailedUploads)
+    #expect(skipped.failedUploads.isEmpty)
+    #expect(await harness.jira.uploaded.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: folder.path))
+}
+
+@Test func restartKeepsMaterialAndUploadsItOnSubmit() async throws {
+    let harness = Harness()
+    let png = Data("png-bytes".utf8)
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "client-email.txt",
+                mimeType: "text/plain",
+                data: Data("client says the pick screen is wrong".utf8)
+            )
+        )
+    )
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: png)
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+
+    let restarted = harness.reopen()
+    let submitted = try await restarted.perform(.submit)
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    let uploads = await harness.jira.uploaded
+    #expect(uploads.map(\.filename) == ["pick.png"])
+    #expect(uploads.first?.data == png)
+}
+
+@Test func restartRetriesAFailedUploadQueueThenDeletesTheFolder() async throws {
+    let harness = Harness()
+    let png = Data("png-bytes".utf8)
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: png)
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let folder = harness.draftFolder(id: try #require(generated.draft?.id))
+
+    await harness.jira.setFailUploads(true)
+    _ = try await harness.session.perform(.submit)
+
+    let restarted = harness.reopen()
+    let queued = try await restarted.state()
+    #expect(queued.draft?.key == TicketKey("FAK-1"))
+    #expect(queued.failedUploads == ["pick.png"])
+    #expect(queued.draft?.title == StoryReply.title)
+
+    await harness.jira.setFailUploads(false)
+    let retried = try await restarted.perform(.retryUploads)
+    #expect(retried.failedUploads.isEmpty)
+    #expect(await harness.jira.uploaded.map(\.filename) == ["pick.png"])
+    #expect(!FileManager.default.fileExists(atPath: folder.path))
+}
+
+@Test func restartBeforeGenerateKeepsTextMaterialForGenerate() async throws {
+    let harness = Harness()
+    let email = "From: client@acme.com\nScan the bin before pick."
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "client-email.txt", mimeType: "text/plain", data: Data(email.utf8))
+        )
+    )
+
+    let restarted = harness.reopen()
+    _ = try await restarted.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await restarted.perform(.generate)
+    let user = try #require(await harness.model.completeRequests.first?.user)
+    #expect(user.contains(email))
+    #expect(user.contains("client-email.txt"))
+}
+
 @Test func afterSubmitLocalInsertKeepsShortLabelAndTypeWhenThePullReturnsTheRowWithoutThem()
     async throws
 {
@@ -711,12 +1066,6 @@ import Fakthis
     let created = await harness.jira.created
     #expect(created.count == 1)
     #expect(created[0].title == StoryReply.title)
-
-    let sidecar = try JSONDecoder().decode(
-        DiskSidecar.self,
-        from: Data(contentsOf: harness.draftFolder(id: original.id).appending(component: "draft.json"))
-    )
-    #expect(sidecar.key == "FAK-1")
 }
 
 @Test func restartAfterSubmitDoesNotRestoreTheUploadQueueAsAnEditor() async throws {
@@ -797,14 +1146,6 @@ import Fakthis
     let submitted = try await harness.session.perform(.submit)
     let draft = try #require(submitted.draft)
     let key = try #require(draft.key)
-    let folder = harness.draftFolder(id: draft.id)
-
-    #expect(FileManager.default.fileExists(atPath: folder.path))
-    let sidecar = try JSONDecoder().decode(
-        DiskSidecar.self,
-        from: Data(contentsOf: folder.appending(component: "draft.json"))
-    )
-    #expect(sidecar.key == key.value)
 
     await harness.model.replaceReply(
         GenerateReply(

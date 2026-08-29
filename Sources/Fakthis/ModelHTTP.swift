@@ -18,7 +18,7 @@ public actor ModelHTTP: Model {
         self.send = send
     }
 
-    public func complete(system: String, user: String) async throws -> String {
+    public func complete(system: String, user: String, screenshots: [Material]) async throws -> String {
         let key: String
         do {
             key = try await apiKey()
@@ -34,8 +34,8 @@ public actor ModelHTTP: Model {
             ChatRequest(
                 model: modelId,
                 messages: [
-                    ChatMessage(role: "system", content: system),
-                    ChatMessage(role: "user", content: user),
+                    ChatMessage(role: "system", content: .text(system)),
+                    ChatMessage(role: "user", content: .user(text: user, screenshots: screenshots)),
                 ]
             )
         )
@@ -62,7 +62,58 @@ private struct ChatRequest: Encodable {
 
 private struct ChatMessage: Encodable {
     var role: String
-    var content: String
+    var content: Content
+
+    enum Content: Encodable {
+        case text(String)
+        case user(text: String, screenshots: [Material])
+
+        func encode(to encoder: Encoder) throws {
+            switch self {
+            case .text(let text):
+                var container = encoder.singleValueContainer()
+                try container.encode(text)
+            case .user(let text, let screenshots) where screenshots.isEmpty:
+                var container = encoder.singleValueContainer()
+                try container.encode(text)
+            case .user(let text, let screenshots):
+                var container = encoder.unkeyedContainer()
+                try container.encode(ContentPart(type: "text", text: text, imageURL: nil))
+                for screenshot in screenshots {
+                    let encoded = screenshot.data.base64EncodedString()
+                    try container.encode(
+                        ContentPart(
+                            type: "image_url",
+                            text: nil,
+                            imageURL: ImageURL(url: "data:\(screenshot.mimeType);base64,\(encoded)")
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private struct ContentPart: Encodable {
+        var type: String
+        var text: String?
+        var imageURL: ImageURL?
+
+        enum CodingKeys: String, CodingKey {
+            case type, text
+            case imageURL = "image_url"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(type, forKey: .type)
+            try container.encodeIfPresent(text, forKey: .text)
+            try container.encodeIfPresent(imageURL, forKey: .imageURL)
+        }
+    }
+
+    private struct ImageURL: Encodable {
+        var url: String
+    }
 }
 
 private struct ChatResponse: Decodable {
