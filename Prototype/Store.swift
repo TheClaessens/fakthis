@@ -98,6 +98,7 @@ final class Store {
     var material: [MaterialRow] = []
 
     var voice: VoicePhase = .idle
+    var conversationCollapsed = false
     var duplicateDismissed = false
     var catalogRefreshFailed = false
     var relatedTicked: Set<String> = []
@@ -177,6 +178,7 @@ final class Store {
         chat = Fixtures.chat
         field = ""
         voice = .yourTurn
+        conversationCollapsed = false
     }
 
     /// Every warn-not-block signal lit at once, so their placement can be judged together.
@@ -214,6 +216,8 @@ final class Store {
         body = Fixtures.rewriteProposedBody
         chat = []
         voice = .yourTurn
+        // §12 allows Update without ever pressing Generate, so Rewrite opens collapsed.
+        conversationCollapsed = true
     }
 
     // MARK: - Intents

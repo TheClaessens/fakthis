@@ -1,35 +1,242 @@
-// THROWAWAY PROTOTYPE — Variant C, "Rail".
+// THROWAWAY PROTOTYPE — Variant C, "Rail", second pass.
 //
-// ONE window, one layout, always three columns: a contextual rail, the Draft, the conversation.
-// Create / Batch / Rewrite are not modes of the window — they are what the left rail holds
-// (Material, siblings, the live Jira body). The centre and right columns never change shape.
-// Warn-not-block signals live in a gutter down the edge of the Draft, like an editor's minimap:
-// always visible as marks, expandable in place, never in the way of Submit.
+// ONE window, one layout, three columns: a contextual rail, the Draft, the conversation.
+// Create / Batch / Rewrite are what the left rail holds, not modes of the window.
+//
+// Second pass fixes the three things the first pass got wrong:
+//   1. The signal panel now DISPLACES the Draft column instead of floating over it.
+//   2. The conversation column COLLAPSES to a spine, and Rewrite opens collapsed.
+//   3. The pre-Generate state is designed rather than being an empty Draft skeleton — and
+//      because there is no obvious right answer, it comes in three styles.
+//
+// After Generate all three styles are the same window. They differ only in the state that had
+// no design at all in the first pass.
 
 import SwiftUI
 import Fakthis
 
+enum PreGenerate: String, CaseIterable {
+    /// Three columns throughout. The field is promoted into the Draft column until a Draft
+    /// exists, then demotes to the composer on the right.
+    case fieldCentre
+    /// Two columns until Generate. The conversation column does not exist before there is a
+    /// conversation; the window gains it when the Draft appears.
+    case twoColumn
+    /// No columns until Generate. A front door: one field on the canvas, Material dropped onto
+    /// it, and the workbench materialises on Generate.
+    case frontDoor
+
+    var label: String {
+        switch self {
+        case .fieldCentre: "field takes the centre"
+        case .twoColumn: "two columns until Generate"
+        case .frontDoor: "front door, then the workbench"
+        }
+    }
+}
+
 struct VariantC: View {
     @Bindable var store: Store
+    var style: PreGenerate = .fieldCentre
     @State private var signalsExpanded = true
 
     var body: some View {
+        if store.hasDraft {
+            workbench
+        } else {
+            switch style {
+            case .fieldCentre: fieldCentreWindow
+            case .twoColumn: twoColumnWindow
+            case .frontDoor: frontDoorWindow
+            }
+        }
+    }
+
+    // MARK: - The workbench (identical on all three styles, once a Draft exists)
+
+    private var workbench: some View {
         HStack(spacing: 0) {
             surfacePicker
             VRule()
             rail.frame(width: 262)
             VRule()
-            ZStack(alignment: .topTrailing) {
-                draftColumn
-                if signalsExpanded && !store.signals.isEmpty { signalPanel }
+            draftColumn
+            if signalsExpanded && !store.signals.isEmpty {
+                VRule()
+                signalPanel.frame(width: 288)
             }
             VRule()
-            conversation.frame(width: 316)
+            conversationColumn
         }
         .background(Ink.canvas)
     }
 
-    // MARK: Surface picker — a 48pt icon rail, not a mode switch
+    // MARK: - Pre-Generate, style 1: the field takes the Draft column
+
+    private var fieldCentreWindow: some View {
+        HStack(spacing: 0) {
+            surfacePicker
+            VRule()
+            materialRail.frame(width: 262)
+            VRule()
+            VStack(spacing: 0) {
+                PaneTitle("Brain-dump") {
+                    HStack(spacing: 9) {
+                        Text(store.epicName).font(.system(size: 10.5)).foregroundStyle(Ink.dim)
+                        TypeControl(selection: store.ticketType, compact: true)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 11) {
+                    Text("Say or type what the work is. The agent writes the Ticket.")
+                        .font(.system(size: 11.5)).foregroundStyle(Ink.faint)
+                    BodyField(text: $store.field, font: .system(size: 14))
+                        .frame(maxHeight: .infinity)
+                }
+                .padding(16)
+                HRule()
+                preGenerateFooter
+            }
+            .background(Ink.panel)
+            VRule()
+            collapsedConversation(note: "Nothing said yet")
+        }
+        .background(Ink.canvas)
+    }
+
+    // MARK: - Pre-Generate, style 2: two columns until Generate
+
+    private var twoColumnWindow: some View {
+        HStack(spacing: 0) {
+            surfacePicker
+            VRule()
+            materialRail.frame(width: 262)
+            VRule()
+            VStack(spacing: 0) {
+                VoiceStrip(
+                    phase: store.voice,
+                    gesture: "⌥ to start / stop",
+                    compileInProgress: store.aneCompileInProgress
+                )
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 9) {
+                        Text("New Ticket in \(store.epicName)")
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(Ink.ink)
+                        Spacer()
+                        TypeControl(selection: store.ticketType, compact: true)
+                    }
+                    BodyField(text: $store.field, font: .system(size: 14))
+                        .frame(maxHeight: .infinity)
+                    Text("Generate is a separate press. Nothing reaches the agent until you "
+                        + "press it.")
+                        .font(.system(size: 10.5)).foregroundStyle(Ink.faint)
+                }
+                .padding(18)
+                HRule()
+                preGenerateFooter
+            }
+            .background(Ink.panel)
+        }
+        .background(Ink.canvas)
+    }
+
+    // MARK: - Pre-Generate, style 3: a front door
+
+    private var frontDoorWindow: some View {
+        ZStack {
+            Ink.canvas
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .font(.system(size: 12)).foregroundStyle(Ink.accent)
+                    Text("FAK").font(.system(size: 12.5, weight: .semibold))
+                    Text(store.epicName).font(.system(size: 11)).foregroundStyle(Ink.dim)
+                    Spacer()
+                    Press(title: "Batch", glyph: "list.bullet.rectangle", kind: .quiet)
+                    Press(title: "Improve existing", glyph: "arrow.triangle.2.circlepath",
+                          kind: .quiet)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(Ink.panel)
+                HRule()
+                Spacer()
+                VStack(alignment: .leading, spacing: 0) {
+                    VoiceStrip(
+                        phase: store.voice,
+                        gesture: "⌥ to start / stop",
+                        compileInProgress: store.aneCompileInProgress
+                    )
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("What is the work?")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Ink.ink)
+                            Spacer()
+                            TypeControl(selection: store.ticketType, compact: true)
+                        }
+                        BodyField(text: $store.field, font: .system(size: 14))
+                            .frame(height: 188)
+                        HStack(spacing: 7) {
+                            ForEach(store.material) { item in
+                                HStack(spacing: 5) {
+                                    Image(systemName: item.glyph)
+                                        .font(.system(size: 10)).foregroundStyle(Ink.faint)
+                                    Text(item.name).font(.system(size: 10))
+                                        .foregroundStyle(Ink.dim)
+                                }
+                                .padding(.horizontal, 7).padding(.vertical, 4)
+                                .background(Ink.canvas)
+                                .clipShape(Capsule())
+                            }
+                            Press(title: "Attach", glyph: "paperclip", kind: .quiet)
+                            Spacer()
+                        }
+                        HStack(spacing: 9) {
+                            Press(title: store.voice == .listening ? "Stop" : "Speak",
+                                  glyph: "mic.fill") {
+                                store.voice = store.voice == .listening
+                                    ? .transcribing
+                                    : .listening
+                            }
+                            Spacer()
+                            Press(title: "Generate", glyph: "sparkles", kind: .primary) {
+                                Task { await store.generate() }
+                            }
+                        }
+                    }
+                    .padding(18)
+                }
+                .frame(width: 660)
+                .background(Ink.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay { RoundedRectangle(cornerRadius: 10).stroke(Ink.rule, lineWidth: 1) }
+                .shadow(color: .black.opacity(0.10), radius: 16, y: 4)
+                Spacer()
+                Spacer()
+            }
+        }
+    }
+
+    /// Shared footer for the two windowed pre-Generate styles. Submit is absent by design —
+    /// there is nothing to submit until a Draft exists.
+    private var preGenerateFooter: some View {
+        HStack(spacing: 9) {
+            Press(title: store.voice == .listening ? "Stop" : "Speak", glyph: "mic.fill") {
+                store.voice = store.voice == .listening ? .transcribing : .listening
+            }
+            Text(store.voice == .listening
+                ? "Take appends into the field"
+                : "Generate is a separate press")
+                .font(.system(size: 10)).foregroundStyle(Ink.faint)
+            Spacer()
+            Press(title: "Generate", glyph: "sparkles", kind: .primary) {
+                Task { await store.generate() }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(Ink.canvas)
+    }
+
+    // MARK: - Surface picker
 
     private var surfacePicker: some View {
         VStack(spacing: 6) {
@@ -64,7 +271,7 @@ struct VariantC: View {
         }
     }
 
-    // MARK: Rail — the only thing the surface changes
+    // MARK: - Rail
 
     @ViewBuilder private var rail: some View {
         switch store.surface {
@@ -74,26 +281,45 @@ struct VariantC: View {
         }
     }
 
+    /// Material only. Before Generate there are no Related hits and no duplicate — matching
+    /// happens after Generate (§10), so the rail must not pretend otherwise.
+    private var materialRail: some View {
+        VStack(spacing: 0) {
+            PaneTitle("Material") { Press(title: "Attach", glyph: "plus", kind: .quiet) }
+            materialRows
+            Spacer()
+            HRule()
+            catalogFooter
+        }
+        .background(Ink.panel)
+    }
+
+    private var materialRows: some View {
+        VStack(spacing: 0) {
+            ForEach(store.material) { item in
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: item.glyph).font(.system(size: 10.5))
+                        .foregroundStyle(Ink.faint).frame(width: 13).padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.name).font(.system(size: 10.5)).foregroundStyle(Ink.ink)
+                        Text(item.note).font(.system(size: 9)).foregroundStyle(Ink.faint)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
     private var createRail: some View {
         VStack(spacing: 0) {
             PaneTitle("Material") { Press(title: "Attach", glyph: "plus", kind: .quiet) }
-            VStack(spacing: 0) {
-                ForEach(store.material) { item in
-                    HStack(alignment: .top, spacing: 7) {
-                        Image(systemName: item.glyph).font(.system(size: 10.5))
-                            .foregroundStyle(Ink.faint).frame(width: 13).padding(.top, 1)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(item.name).font(.system(size: 10.5)).foregroundStyle(Ink.ink)
-                            Text(item.note).font(.system(size: 9)).foregroundStyle(Ink.faint)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                }
-            }
-            .padding(.vertical, 4)
+            materialRows
             HRule()
-            PaneTitle("Related") { Text("cap 3").font(.system(size: 9)).foregroundStyle(Ink.faint) }
+            PaneTitle("Related") {
+                Text("cap 3").font(.system(size: 9)).foregroundStyle(Ink.faint)
+            }
             VStack(spacing: 0) {
                 ForEach(store.related, id: \.key) { row in
                     HStack(alignment: .top, spacing: 7) {
@@ -280,7 +506,7 @@ struct VariantC: View {
         .background(Ink.panel)
     }
 
-    // MARK: Draft column — identical on all three surfaces
+    // MARK: - Draft column
 
     private var draftColumn: some View {
         VStack(spacing: 0) {
@@ -369,11 +595,14 @@ struct VariantC: View {
         .overlay(alignment: .trailing) { gutter }
     }
 
-    /// The signal gutter: one mark per warn-not-block signal, down the edge of the Draft.
+    /// One mark per warn-not-block signal, down the edge of the Draft. Opening the panel pushes
+    /// the Draft narrower — it never covers it.
     private var gutter: some View {
         VStack(spacing: 5) {
             Button { signalsExpanded.toggle() } label: {
-                Image(systemName: signalsExpanded ? "chevron.right" : "exclamationmark.triangle.fill")
+                Image(systemName: signalsExpanded
+                    ? "chevron.right"
+                    : "exclamationmark.triangle.fill")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(store.signals.isEmpty ? Ink.faint : Ink.warn)
                     .frame(width: 20, height: 18)
@@ -410,20 +639,21 @@ struct VariantC: View {
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(Ink.canvas)
             HRule()
-            ForEach(store.signals) { signal in
-                SignalRow(signal: signal)
-                HRule()
+            Scroll {
+                VStack(spacing: 0) {
+                    ForEach(store.signals) { signal in
+                        SignalRow(signal: signal)
+                        HRule()
+                    }
+                }
             }
             Text("None of these block Submit.")
                 .font(.system(size: 9.5)).foregroundStyle(Ink.faint)
                 .padding(.horizontal, 10).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Ink.canvas)
         }
-        .frame(width: 296)
         .background(Ink.panel)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay { RoundedRectangle(cornerRadius: 8).stroke(Ink.rule, lineWidth: 1) }
-        .shadow(color: .black.opacity(0.13), radius: 10, y: 3)
-        .padding(.top, 38).padding(.trailing, 26)
     }
 
     private var footer: some View {
@@ -456,21 +686,63 @@ struct VariantC: View {
         .background(Ink.canvas)
     }
 
-    // MARK: Conversation column — identical on all three surfaces
+    // MARK: - Conversation column, now collapsible
+
+    @ViewBuilder private var conversationColumn: some View {
+        if store.conversationCollapsed {
+            collapsedConversation(note: store.chat.isEmpty
+                ? "No chat on this Draft"
+                : "\(store.chat.count) turns")
+        } else {
+            conversation.frame(width: 316)
+        }
+    }
+
+    /// A 46pt spine. Rewrite opens collapsed — §12 allows Update without ever pressing Generate,
+    /// so the conversation is owed no width until there is a conversation.
+    private func collapsedConversation(note: String) -> some View {
+        VStack(spacing: 10) {
+            Button { store.conversationCollapsed = false } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 9, weight: .bold)).foregroundStyle(Ink.faint)
+                    .frame(width: 24, height: 20)
+            }
+            .buttonStyle(.plain)
+            Circle()
+                .fill(store.voice == .listening ? Ink.danger : Ink.faint)
+                .frame(width: 6, height: 6)
+            Text(note)
+                .font(.system(size: 9.5))
+                .foregroundStyle(Ink.faint)
+                .fixedSize()
+                .rotationEffect(.degrees(90))
+                .frame(width: 20, height: 130)
+                .padding(.top, 40)
+            Spacer()
+        }
+        .padding(.top, 12)
+        .frame(width: 46)
+        .background(Ink.panel)
+    }
 
     private var conversation: some View {
         VStack(spacing: 0) {
-            VoiceStrip(
-                phase: store.voice,
-                gesture: store.hasDraft ? "hold ⌥" : "⌥ toggle",
-                compileInProgress: store.aneCompileInProgress
-            )
+            HStack(spacing: 0) {
+                Button { store.conversationCollapsed = true } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold)).foregroundStyle(Ink.faint)
+                        .frame(width: 24, height: 26)
+                }
+                .buttonStyle(.plain)
+                VoiceStrip(
+                    phase: store.voice,
+                    gesture: store.hasDraft ? "hold ⌥" : "⌥ toggle",
+                    compileInProgress: store.aneCompileInProgress
+                )
+            }
+            .background(Ink.panel)
             Scroll {
                 VStack(alignment: .leading, spacing: 10) {
-                    if !store.hasDraft {
-                        Text("Brain-dump, then press Generate.")
-                            .font(.system(size: 10.5)).foregroundStyle(Ink.faint)
-                    }
                     ForEach(store.chat) { turn in
                         VStack(alignment: .leading, spacing: 3) {
                             Text(turn.role == .agent ? "Agent" : "You")
@@ -506,20 +778,13 @@ struct VariantC: View {
             }
             HRule()
             VStack(alignment: .leading, spacing: 7) {
-                BodyField(text: $store.field, font: .system(size: 12))
-                    .frame(height: store.hasDraft ? 60 : 130)
+                BodyField(text: $store.field, font: .system(size: 12)).frame(height: 60)
                 HStack(spacing: 7) {
                     Press(title: store.voice == .listening ? "Stop" : "Speak", glyph: "mic.fill") {
                         store.voice = store.voice == .listening ? .transcribing : .listening
                     }
                     Spacer()
-                    if store.hasDraft {
-                        Press(title: "Send", kind: .primary) { Task { await store.send() } }
-                    } else {
-                        Press(title: "Generate", glyph: "sparkles", kind: .primary) {
-                            Task { await store.generate() }
-                        }
-                    }
+                    Press(title: "Send", kind: .primary) { Task { await store.send() } }
                 }
             }
             .padding(11)

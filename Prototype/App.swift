@@ -19,7 +19,7 @@ enum Variant: String, CaseIterable {
         switch self {
         case .a: "Workbench — one window, two panes"
         case .b: "Desk — separate windows, one scroll"
-        case .c: "Rail — one window, three columns"
+        case .c: "Rail — one window, three columns (2nd pass)"
         }
     }
 }
@@ -41,12 +41,13 @@ struct Scene: Identifiable {
 struct Shell: View {
     @Bindable var store: Store
     var variant: Variant
+    var style: PreGenerate = .fieldCentre
 
     var body: some View {
         switch variant {
         case .a: VariantA(store: store)
         case .b: VariantB(store: store)
-        case .c: VariantC(store: store)
+        case .c: VariantC(store: store, style: style)
         }
     }
 }
@@ -56,12 +57,13 @@ struct Shell: View {
 struct Root: View {
     @State private var store = Store()
     @State private var variant = Variant.a
+    @State private var style = PreGenerate.fieldCentre
     @State private var ready = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
             if ready {
-                Shell(store: store, variant: variant)
+                Shell(store: store, variant: variant, style: style)
             } else {
                 Color(white: 0.95)
             }
@@ -86,6 +88,15 @@ struct Root: View {
             .frame(width: 250)
             Button { cycle(1) } label: { Image(systemName: "chevron.right") }
                 .keyboardShortcut("]", modifiers: .command)
+            if variant == .c {
+                Divider().frame(height: 18)
+                ForEach(Array(PreGenerate.allCases.enumerated()), id: \.element) { i, option in
+                    Button(option.label) { style = option }
+                        .font(.system(size: 10.5,
+                                      weight: option == style ? .bold : .regular))
+                        .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
+                }
+            }
             Divider().frame(height: 18)
             ForEach(scenes) { scene in
                 Button(scene.label) {
@@ -160,9 +171,66 @@ enum Shooter {
     }
 }
 
+/// Second pass. Shots/ stays frozen as the first-pass primary source that FINDINGS.md cites;
+/// the second pass writes to Shots2/ so neither invalidates the other.
+@MainActor
+enum SecondPass {
+    static func run(into folder: URL) async throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        // The pre-Generate question: three styles, same scene.
+        for style in PreGenerate.allCases {
+            let store = Store()
+            await store.bootstrap()
+            await store.sceneBrainDump()
+            try shoot(
+                Shell(store: store, variant: .c, style: style),
+                to: folder.appending(component: "c2-1-braindump-\(style.rawValue).png")
+            )
+        }
+
+        // The two fixes. Post-Generate the styles are identical, so shoot these once.
+        for scene in scenes where scene.id != "1-braindump" {
+            let store = Store()
+            await store.bootstrap()
+            await scene.run(store)
+            try shoot(
+                Shell(store: store, variant: .c),
+                to: folder.appending(component: "c2-\(scene.id).png")
+            )
+        }
+    }
+
+    static func shoot(_ view: some View, to file: URL) throws {
+        let renderer = ImageRenderer(
+            content: view
+                .environment(\.shooting, true)
+                .environment(\.colorScheme, .light)
+                .frame(width: Shooter.size.width, height: Shooter.size.height)
+        )
+        renderer.scale = 2
+        guard let image = renderer.nsImage,
+              let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else {
+            print("failed \(file.lastPathComponent)")
+            return
+        }
+        try png.write(to: file)
+        print("wrote \(file.lastPathComponent)")
+    }
+}
+
 @main
 struct Entry {
     static func main() async throws {
+        if CommandLine.arguments.contains("--shoot2") {
+            let folder = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appending(component: "Prototype")
+                .appending(component: "Shots2")
+            try await SecondPass.run(into: folder)
+            return
+        }
         if CommandLine.arguments.contains("--shoot") {
             let folder = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appending(component: "Prototype")
