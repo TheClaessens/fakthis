@@ -56,6 +56,10 @@ The Draft column is **bounded with a fixed footer**. Submit and the rewrite diff
 
 Once a Draft exists, the conversation column is **collapsible** (it collapses to a spine). Create and Batch open it for chat. Rewrite opens with it collapsed: Update does not require Generate.
 
+**Measure.** The Draft's text is never measured narrower than **460pt**. Below that the description wraps too narrow to read the prose a developer picks the work up from, so this is the number "bounded column" is worth: the window's minimum width leaves the Draft 636pt with all three columns open, and anything that wants width — the signal panel is the only thing that does — trades against this floor, never through it.
+
+**Appearance.** The window renders in light *and* dark, and dark is not a repaint of light. macOS gives `windowBackgroundColor`, `controlBackgroundColor` and `textBackgroundColor` the same near-black in dark appearance, so a design that layers one on another goes flat there while reading correctly in light. The window's layering is therefore its own rule, not two AppKit colours: **the three columns are one ground, and everything that reads as a step off a column — the front door's canvas, the Draft's fixed footer, the gutter, the signal panel, a Material chip, a conversation turn, the focused sibling — is the window ground**, which carries a dark value of its own. A surface built from `windowBackgroundColor` will disappear. Judge it by running in both appearances: a screenshot in one says nothing about the other.
+
 ---
 
 ## 3. Setup and the Project list

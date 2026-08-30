@@ -23,8 +23,10 @@ Replace `NN`. Nothing else changes between tickets.
 
 ## Window invariants
 
-Settled by the UI-shell prototype and folded into the spec by #29. They are decisions, not
-preferences: do not re-open them, and do not quietly violate one to make a ticket easier.
+1–13 were settled by the UI-shell prototype and folded into the spec by #29; 14 and 15 by
+running the window in anger in #40, which is where the prototype could not go. They are
+decisions, not preferences: do not re-open them, and do not quietly violate one to make a
+ticket easier.
 
 1. **One window, three columns**: rail, Draft, conversation. Create, Batch and Rewrite are
    not modes — they are what the **rail** holds. The Draft and conversation columns keep
@@ -58,6 +60,11 @@ preferences: do not re-open them, and do not quietly violate one to make a ticke
     hand-edit.
 13. **The text-Material provider disclosure is setup-time only.** It has no place in the
     Draft UI; every attempt to put one there was noise.
+14. **The columns are one ground; everything that steps off a column is `Color.windowGround`.**
+    A surface built from `windowBackgroundColor` reads correctly in light and vanishes in
+    dark, where AppKit gives it the same near-black as the columns. Spec §2, Appearance.
+15. **The Draft's text is never measured under 460pt** (`WindowShape.draftFloor`). Anything
+    that wants width trades against that floor, never through it. Spec §2, Measure.
 
 ## The seam
 
