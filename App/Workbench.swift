@@ -9,9 +9,16 @@ struct Workbench: View {
     var draft: Draft
 
     /// Whether the conversation is a spine. The surface owns it rather than the column, because
-    /// Rewrite has to be able to open with it already collapsed — Update does not require
-    /// Generate — and Rewrite is its own ticket. Create opens with it open.
-    @State private var conversationCollapsed = false
+    /// Rewrite opens with it already collapsed — Update does not require Generate — and a
+    /// keyboard-only rewrite should not stare at an empty third of the window. Create opens
+    /// with it open.
+    @State private var conversationCollapsed: Bool
+
+    init(model: WindowModel, draft: Draft) {
+        self.model = model
+        self.draft = draft
+        _conversationCollapsed = State(initialValue: model.rewrite != nil)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -28,14 +35,35 @@ struct Workbench: View {
             // would hide it, and Continue cannot be pressed from a mark that does not exist yet.
             if hit != nil { conversationCollapsed = false }
         }
+        .onChange(of: model.rewrite != nil) { _, rewriting in
+            // Duplicate → work-on-that lands in Rewrite on this same Workbench. Init does not
+            // run again, so the collapse has to happen here. Update clearing `rewrite` must
+            // not expand the spine — the PM did not ask for a conversation.
+            if rewriting { conversationCollapsed = true }
+        }
     }
 
     // MARK: - Rail
 
-    /// On Create the rail holds Material, and Related when there are hits. No hits is no UI,
-    /// not an empty "Related" heading — that is the normal case. The sibling list and the live
-    /// body are what it holds on the other surfaces; those are their own tickets.
+    /// Create: Material, and Related when there are hits. Rewrite: the live description and
+    /// comments, beside the Draft. Related stays under either — it is Context for the next
+    /// turn, not a second rail.
     private var rail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let rewrite = model.rewrite {
+                RewriteRail(rewrite: rewrite)
+                related
+            } else {
+                material
+                related
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var material: some View {
         VStack(alignment: .leading, spacing: 0) {
             ColumnTitle("Material")
             if model.material.isEmpty {
@@ -62,11 +90,7 @@ struct Workbench: View {
                 }
                 .padding(.vertical, 4)
             }
-            related
-            Spacer(minLength: 0)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     /// Ignorable, default off as a write. Ticking a key is Context for the next turn; nothing
@@ -262,13 +286,15 @@ struct DraftColumn: View {
 
     // MARK: - Footer
 
-    /// Fixed, so Submit is on screen whatever the description does above it. After Submit the
-    /// same strip names the Ticket and carries the upload step.
+    /// Fixed, so Submit and the rewrite diff are on screen whatever the description does above
+    /// them. After the write the same strip names the Ticket and carries the upload step.
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let submitted = model.submitted {
                 submittedRow(submitted)
                 uploadStep(key: submitted.key)
+            } else if let rewrite = model.rewrite, let key = draft.key {
+                RewriteFooter(model: model, draft: draft, rewrite: rewrite, key: key)
             } else {
                 submitRow
             }

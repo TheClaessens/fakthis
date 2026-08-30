@@ -8,7 +8,7 @@ import Fakthis
 /// over a surface that cannot be used yet.
 ///
 /// It **collapses to a spine** and expands again, and the Draft column takes the width when it
-/// does. Rewrite will open with it collapsed — Update does not require Generate — which is why
+/// does. Rewrite opens with it collapsed — Update does not require Generate — which is why
 /// the collapse is a binding the surface owns rather than a switch hidden in here.
 struct ConversationColumn: View {
     var model: WindowModel

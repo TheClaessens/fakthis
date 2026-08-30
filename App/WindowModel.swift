@@ -25,6 +25,13 @@ final class WindowModel {
     /// it was when Jira does not answer — but, as with Submit, a press that does nothing at all
     /// is worse than the failure, so the window says it.
     private(set) var projectKeyRefused = false
+    /// Same shape as `projectKeyRefused`, for a Ticket key that Jira did not answer. A 404, an
+    /// epic and another Project's key are `rewriteError` instead — those are refusals with a
+    /// reason, not a press that vanished.
+    private(set) var pasteKeyRefused = false
+    /// Same shape as `submitRefused`, for an Update (or a clobber) that Jira did not answer.
+    /// A stale `updated` is not this: that is a warn, and the Draft is still an editor.
+    private(set) var updateRefused = false
     private(set) var failure: String?
 
     private let session: Session
@@ -42,6 +49,8 @@ final class WindowModel {
     func perform(_ intent: Session.Intent) async {
         submitRefused = false
         projectKeyRefused = false
+        pasteKeyRefused = false
+        updateRefused = false
         await run { try await $0.perform(intent) }
     }
 
@@ -127,10 +136,39 @@ final class WindowModel {
 
     /// Submit creates the Jira issue immediately — no queue, no approval step — and the same
     /// press carries the media upload that follows it, which is why this is the one press the
-    /// window waits on.
+    /// window waits on. Rewrite never comes through here: a Draft bound to a key Updates.
     func submit() async {
         await whileWorking { await perform(.submit) }
         submitRefused = submitted == nil
+    }
+
+    /// Fetch the live Ticket and bind a rewrite Draft to that key. A round trip, so it waits
+    /// the way Generate does. The window does not decide what a bad key is — `Session` does.
+    func pasteKey(_ key: String) async {
+        pasteKeyRefused = false
+        await whileWorking { await perform(.pasteKey(key)) }
+        pasteKeyRefused = draft == nil && rewriteError == nil
+    }
+
+    /// Write title, description and the completeness marker. Watchers are emailed; that fact
+    /// sits on the button, not here. A stale `updated` comes back as `rewrite.stale` rather
+    /// than a write, so this is not refused — the footer offers Re-fetch.
+    func update() async {
+        updateRefused = false
+        await whileWorking { await perform(.update) }
+        updateRefused = rewrite != nil && rewrite?.stale != true
+    }
+
+    func refetch() async {
+        await whileWorking { await perform(.refetch) }
+    }
+
+    /// Proceed anyway after a stale `updated`. The Draft survives either way; this is the
+    /// write that clobbers.
+    func clobber() async {
+        updateRefused = false
+        await whileWorking { await perform(.clobber) }
+        updateRefused = rewrite != nil
     }
 
     /// A chat answer, sent by its own press. Like Generate it commits nothing — the composer is
@@ -209,6 +247,11 @@ final class WindowModel {
 
     var draft: Draft? { state?.draft }
     var submitted: SubmittedTicket? { state?.submitted }
+    /// Present exactly while this Draft is a rewrite: bound to a key, still an editor, and
+    /// Update is the write. The window reads it rather than guessing from `draft.key`, because
+    /// a leftover create that has a key is an upload queue, not a rewrite.
+    var rewrite: Rewrite? { state?.rewrite }
+    var rewriteError: String? { state?.rewriteError }
     /// The Draft stops being an editor the moment the Jira issue exists (§4). `Session` owns
     /// that rule; the window reads its answer rather than deriving one from the key.
     var editable: Bool { submitted == nil }

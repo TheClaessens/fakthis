@@ -15,6 +15,9 @@ struct FrontDoor: View {
     @State private var showingProjects = false
     @State private var showingTerms = false
     @State private var reading = false
+    /// The key field is a front-door surface, not a sheet: Batch and Rewrite are toolbar
+    /// buttons until a Draft exists, and this is what Rewrite's button opens.
+    @State private var improvingExisting = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,18 +25,27 @@ struct FrontDoor: View {
             Divider()
             ZStack {
                 Color(nsColor: .windowBackgroundColor)
-                SessionField(model: model) { brainDump in
-                    composer(brainDump)
-                        .frame(width: 660)
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color(nsColor: .separatorColor))
+                Group {
+                    if improvingExisting {
+                        ImproveExisting(
+                            model: model,
+                            cancel: { improvingExisting = false }
+                        )
+                    } else {
+                        SessionField(model: model) { brainDump in
+                            composer(brainDump)
                         }
-                        .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
                         .materialIntake(attach: attach)
+                    }
                 }
+                .frame(width: 660)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color(nsColor: .separatorColor))
+                }
+                .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
             }
         }
         .sheet(isPresented: $showingProjects) {
@@ -76,8 +88,8 @@ struct FrontDoor: View {
     // MARK: - Toolbar
 
     /// With no rail before Generate, Batch and Rewrite have nowhere to live, so they are two
-    /// toolbar buttons. You choose the surface before you have anything to put on it. Both are
-    /// wired by their own tickets.
+    /// toolbar buttons. You choose the surface before you have anything to put on it. Batch is
+    /// still its own ticket; Rewrite's button opens the key field.
     ///
     /// The Project key is the third: everything that belongs to the Project rather than to this
     /// Draft — its terms, the other Projects, adding one — hangs off the name of the Project you
@@ -88,9 +100,12 @@ struct FrontDoor: View {
             Spacer()
             Group {
                 Button("Batch", systemImage: "list.bullet.rectangle") {}
-                Button("Improve existing", systemImage: "arrow.triangle.2.circlepath") {}
+                Button("Improve existing", systemImage: "arrow.triangle.2.circlepath") {
+                    improvingExisting = true
+                }
             }
             .buttonStyle(.accessoryBar)
+            .disabled(model.working)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
