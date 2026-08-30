@@ -11,11 +11,6 @@ import Fakthis
 /// conversation column and no collapsed spine; before Generate that column does not exist.
 struct FrontDoor: View {
     var model: WindowModel
-    /// The editing buffer for `Session`'s field. Every edit goes straight in as an intent, and a
-    /// field `Session` changed for its own reasons — a take the transcriber appended — is adopted
-    /// back, so the PM reads the words before Generate ever sees them.
-    @State private var brainDump = ""
-    @State private var pushesInFlight = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,31 +18,19 @@ struct FrontDoor: View {
             Divider()
             ZStack {
                 Color(nsColor: .windowBackgroundColor)
-                composer
-                    .frame(width: 660)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10)
-                            .strokeBorder(Color(nsColor: .separatorColor))
-                    }
-                    .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
-                    .materialIntake(attach: attach)
+                SessionField(model: model) { brainDump in
+                    composer(brainDump)
+                        .frame(width: 660)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(Color(nsColor: .separatorColor))
+                        }
+                        .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
+                        .materialIntake(attach: attach)
+                }
             }
-        }
-        .onAppear { brainDump = model.field }
-        .onChange(of: brainDump) { _, typed in
-            pushesInFlight += 1
-            Task {
-                await model.typeBrainDump(typed)
-                pushesInFlight -= 1
-            }
-        }
-        .onChange(of: model.field) { _, field in
-            // Only while the composer is quiet. A state that arrived mid-keystroke is behind
-            // what has been typed, and adopting it would undo the typing.
-            guard pushesInFlight == 0, field != brainDump else { return }
-            brainDump = field
         }
     }
 
@@ -73,14 +56,14 @@ struct FrontDoor: View {
 
     // MARK: - Composer
 
-    private var composer: some View {
+    private func composer(_ brainDump: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What is the work?")
                 .font(.system(size: 15, weight: .semibold))
 
             /// Sixty spoken words, not a column-height box. A field the height of the window
             /// makes it look like Fakthis is waiting for an essay.
-            BrainDumpField(text: $brainDump, attach: attach)
+            BrainDumpField(text: brainDump, attach: attach)
                 .frame(height: 150)
                 .background(Color(nsColor: .textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -89,7 +72,7 @@ struct FrontDoor: View {
                         .strokeBorder(Color(nsColor: .separatorColor))
                 }
                 .overlay(alignment: .topLeading) {
-                    if brainDump.isEmpty {
+                    if brainDump.wrappedValue.isEmpty {
                         Text("Say what the work is. Drop, paste or attach what produced it.")
                             .font(.system(size: 13.5))
                             .foregroundStyle(.tertiary)
@@ -111,7 +94,7 @@ struct FrontDoor: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!canGenerate)
+                .disabled(!canGenerate(brainDump.wrappedValue))
             }
         }
         .padding(18)
@@ -144,7 +127,7 @@ struct FrontDoor: View {
         }
     }
 
-    private var canGenerate: Bool {
+    private func canGenerate(_ brainDump: String) -> Bool {
         !model.working
             && !brainDump.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

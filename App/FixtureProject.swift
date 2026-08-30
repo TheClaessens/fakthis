@@ -35,6 +35,16 @@ enum FixtureProject {
     /// this file when #35 lands real setup.
     static var submitOnOpen: Bool { CommandLine.arguments.contains("--submit") }
 
+    /// The same scaffolding for the workbench: launch with `--generate` and the fixture types a
+    /// brain-dump and presses Generate on open, so the three columns can be looked at without a
+    /// synthetic click. Goes with the rest of this file when #35 lands real setup.
+    static var generateOnOpen: Bool { CommandLine.arguments.contains("--generate") }
+
+    /// What it types. Sixty spoken words about a Ticket the canned replies answer.
+    static let brainDump =
+        "the checkout total is wrong on mobile, it shows the total from before you changed "
+        + "the basket and only fixes itself if you refresh"
+
     /// Walk `Session` up to "a Project exists", once. On every later launch the Project is
     /// already on disk and `Session` loads it, so this does nothing.
     static func open(_ session: Session) async throws -> Session.State {

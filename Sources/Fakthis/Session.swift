@@ -778,7 +778,10 @@ public actor Session {
             }
             user = parts.joined(separator: "\n\n")
         } else {
-            user = field
+            // The field is spent by the press that sends it, so a second Generate — the PM
+            // ticked a related Ticket and asked for the Draft again — sends the brain-dump it
+            // was written from rather than an empty turn.
+            user = field.isEmpty ? brainDump : field
         }
         guard !blocks.isEmpty else { return user }
         return ([user] + blocks).joined(separator: "\n\n")
@@ -803,8 +806,12 @@ public actor Session {
         ]
     }
 
+    /// A chat answer, sent by its own press (§7.4). An empty composer has no answer in it, so
+    /// the press is refused rather than sending the agent a blank turn to revise the Draft from.
     private func send() async throws {
-        guard let draft, !isUploadQueue, project != nil else { return }
+        guard let draft, !isUploadQueue, project != nil,
+            !field.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
         try await reviseDraft(
             user: draftAndAnswerMessage(draft),
             instruction: sendInstruction,
@@ -858,7 +865,8 @@ public actor Session {
             user: reshapeUserMessage(draft),
             instruction: reshapeInstruction(ticketType),
             screenshots: material.filter(\.isScreenshot),
-            ticketType: ticketType
+            ticketType: ticketType,
+            spendsField: false
         )
     }
 
@@ -1277,6 +1285,9 @@ public actor Session {
             else { return }
             draft = stored.draft
             draftId = stored.draft.id
+            // The conversation is the focused Draft's. Carrying the abandoned Draft's chat into
+            // this one would put questions about a different Ticket on screen.
+            loadTranscript(draftId: stored.draft.id)
             failedUploads = stored.failedUploads
             blockedUploads = []
             material = try loadMaterial()
@@ -1287,11 +1298,18 @@ public actor Session {
         }
     }
 
+    /// One round trip to the agent, whatever pressed it.
+    ///
+    /// `spendsField` is what separates the two kinds of press. Generate and Send are the PM
+    /// saying something: the field is their turn, so it is recorded and emptied. A Ticket type
+    /// change is not — it reshapes the Draft against another template, and a half-typed answer
+    /// sitting in the composer is neither said nor sent, so it stays where the PM left it.
     private func reviseDraft(
         user: String,
         instruction: String,
         screenshots: [Material],
-        ticketType: TicketType? = nil
+        ticketType: TicketType? = nil,
+        spendsField: Bool = true
     ) async throws {
         guard let project else { return }
         status = .agentThinking
@@ -1343,7 +1361,11 @@ public actor Session {
         )
         try persistDraft()
         try persistMaterial()
-        try recordTurn(said: field, asked: generated.openQuestions)
+        try recordTurn(said: spendsField ? field : "", asked: generated.openQuestions)
+        // The press spent the field. What the PM said is in the conversation now, so leaving a
+        // copy of it in the composer would offer to say it a second time — and a second Send
+        // would record it as a second turn.
+        if spendsField { field = "" }
         refreshBatchSiblings()
         try refreshMatches()
     }

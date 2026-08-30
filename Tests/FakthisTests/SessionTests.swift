@@ -1550,7 +1550,9 @@ import Fakthis
     let generated = try await harness.generateStory(
         openQuestions: ["What should happen when the bin scan fails?"]
     )
-    #expect(generated.field == StoryReply.brainDump)
+    // Generate spent the field: what the PM said is in the conversation, and the composer is
+    // ready for the answer to the question that came back.
+    #expect(generated.field.isEmpty)
     let requestsAfterGenerate = await harness.model.completeRequests.count
 
     await harness.transcriber.enqueueTake("show a blocking error and do not take items")
@@ -1662,7 +1664,7 @@ import Fakthis
     let corrected = "pickers must scan the tote before they pick"
     _ = try await harness.session.perform(.typeBrainDump(corrected))
     let generated = try await harness.session.perform(.generate)
-    #expect(generated.field == corrected)
+    #expect(generated.field.isEmpty)
     #expect(await harness.model.completeRequests.first?.user == corrected)
 }
 
@@ -1675,7 +1677,7 @@ import Fakthis
     #expect(listening.field == StoryReply.brainDump)
 
     let generated = try await harness.session.perform(.generate)
-    #expect(generated.field == StoryReply.brainDump)
+    #expect(generated.field.isEmpty)
     #expect(await harness.model.completeRequests.first?.user == StoryReply.brainDump)
     #expect(await harness.transcriber.boostLists.isEmpty)
 }
@@ -4285,4 +4287,134 @@ private struct DiskProject: Codable {
     #expect(submitted.submitted?.key == TicketKey("FAK-1"))
     #expect(await harness.jira.uploaded.isEmpty)
     #expect(submitted.failedUploads.isEmpty)
+}
+
+// MARK: - #33 The conversation column, collapsible
+
+@Test func aSentAnswerLeavesTheComposerSoItIsNotOfferedTwice() async throws {
+    // The composer is `Session`'s field, and the press spends it. A copy left behind would sit
+    // in the composer under the answer it already produced, and a second Send would record the
+    // same thing the conversation is already showing.
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.field.isEmpty)
+
+    await harness.model.replaceReply(StoryReply.asking())
+    _ = try await harness.session.perform(.typeBrainDump("The current basket, on load."))
+    let answered = try await harness.session.perform(.send)
+
+    #expect(answered.field.isEmpty)
+    #expect(
+        answered.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+            TranscriptLine(role: .pm, text: "The current basket, on load."),
+        ]
+    )
+}
+
+@Test func sendOnAnEmptyComposerSaysNothingToTheAgent() async throws {
+    let harness = Harness()
+    let generated = try await harness.generateStory(
+        openQuestions: ["Which basket does the summary read?"]
+    )
+    let requestsAfterGenerate = await harness.model.completeRequests.count
+
+    let pressed = try await harness.session.perform(.send)
+
+    #expect(await harness.model.completeRequests.count == requestsAfterGenerate)
+    #expect(pressed.transcript == generated.transcript)
+    #expect(pressed.draft == generated.draft)
+}
+
+@Test func changingTicketTypeMidChatKeepsTheConversation() async throws {
+    // §7.4: a reshape against the new template keeps Material and the answers already given.
+    // The conversation is where those answers are read, so it survives the reshape.
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+
+    await harness.model.replaceReply(StoryReply.asking())
+    _ = try await harness.session.perform(.typeBrainDump("The current basket, on load."))
+    _ = try await harness.session.perform(.send)
+
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .bug,
+            title: BugReply.title,
+            shortLabel: BugReply.shortLabel,
+            description: BugReply.firstPassDescription,
+            openQuestions: []
+        )
+    )
+    let reshaped = try await harness.session.perform(.changeTicketType(.bug))
+
+    #expect(reshaped.draft?.ticketType == .bug)
+    #expect(
+        reshaped.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+            TranscriptLine(role: .pm, text: "The current basket, on load."),
+        ]
+    )
+}
+
+@Test func aHalfTypedAnswerIsNotSaidByChangingTheTicketType() async throws {
+    // A reshape is not the PM saying something. An answer still being typed has not been Sent,
+    // so it neither joins the conversation nor leaves the composer.
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+
+    _ = try await harness.session.perform(.typeBrainDump("the current basket, on lo"))
+    await harness.model.replaceReply(
+        GenerateReply(
+            ticketType: .bug,
+            title: BugReply.title,
+            shortLabel: BugReply.shortLabel,
+            description: BugReply.firstPassDescription,
+            openQuestions: ["Which browsers has this been seen on?"]
+        )
+    )
+    let reshaped = try await harness.session.perform(.changeTicketType(.bug))
+
+    #expect(reshaped.field == "the current basket, on lo")
+    #expect(
+        reshaped.transcript == [
+            TranscriptLine(role: .pm, text: StoryReply.brainDump),
+            TranscriptLine(role: .agent, text: "Which basket does the summary read?"),
+            TranscriptLine(role: .agent, text: "Which browsers has this been seen on?"),
+        ]
+    )
+}
+
+@Test func workingOnADuplicateLocalDraftShowsThatDraftsConversation() async throws {
+    // The conversation on screen is always the focused Draft's. Landing on the Draft the
+    // duplicate matched while the abandoned one's chat stayed up would put questions about a
+    // different Ticket in the column.
+    let harness = Harness()
+    await harness.model.replaceReply(StoryReply.asking("Which basket does the summary read?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    #expect(generated.transcript.count == 2)
+
+    let otherId = "other-draft"
+    try harness.writeDraft(
+        id: otherId,
+        ticketType: .story,
+        title: "As a picker I want to scan a bin so that I pick from the right location",
+        shortLabel: StoryReply.shortLabel,
+        description: "A sibling Draft about scanning a bin."
+    )
+    let rematched = try await harness.session.perform(.generate)
+    #expect(rematched.duplicateInterrupt?.draftId == otherId)
+
+    let focused = try await harness.session.perform(.workOnDuplicate)
+
+    #expect(focused.draft?.id == otherId)
+    #expect(focused.transcript.isEmpty)
 }

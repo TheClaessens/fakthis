@@ -6,9 +6,10 @@ import Fakthis
 /// and nothing derived from it that outlives a render. There is no second copy of the Draft, and
 /// no rule that belongs behind `Session` is repeated here.
 ///
-/// The composer's text is `Session`'s too. The window pushes every edit in as `.typeBrainDump`
-/// and reads the field back out, so a take the transcriber appends is on screen for the PM to
-/// look at before Generate — which is the whole point of Generate being a separate press.
+/// The field's text is `Session`'s too — the brain-dump before Generate and the chat answer
+/// after it are the same one field. The window pushes every edit in and reads the field back
+/// out, so a take the transcriber appends is on screen for the PM to look at before Generate,
+/// which is the whole point of Generate being a separate press.
 @MainActor
 @Observable
 final class WindowModel {
@@ -39,7 +40,11 @@ final class WindowModel {
         await run { try await $0.perform(intent) }
     }
 
-    func typeBrainDump(_ text: String) async {
+    /// A keystroke in the field, whichever surface is drawing it. Not named for the brain-dump:
+    /// a later chat answer is not one (`CONTEXT.md`), and it goes into the same field. The
+    /// intent behind it still carries the old name — renaming it would edit `Prototype/`, which
+    /// stands until #40.
+    func type(_ text: String) async {
         await perform(.typeBrainDump(text))
     }
 
@@ -55,6 +60,13 @@ final class WindowModel {
     func submit() async {
         await whileWorking { await perform(.submit) }
         submitRefused = submitted == nil
+    }
+
+    /// A chat answer, sent by its own press. Like Generate it commits nothing — the composer is
+    /// already `Session`'s field — it only asks for the Draft to be revised from what the field
+    /// holds, and `Session` spends the field doing it.
+    func send() async {
+        await whileWorking { await perform(.send) }
     }
 
     /// Reshaping the Draft against another template is a round trip to the agent, so it waits
@@ -102,6 +114,10 @@ final class WindowModel {
     var canStartANewDraft: Bool { submitted != nil && failedUploads.isEmpty && state?.batch == nil }
     var failedUploads: [String] { state?.failedUploads ?? [] }
     var field: String { state?.field ?? "" }
+    /// The chat, in the order it was said. `Session` has always written it to the Draft folder;
+    /// the window renders what it reads back and keeps no turns of its own, which is why the
+    /// conversation survives a restart the same way the Draft does.
+    var transcript: [TranscriptLine] { state?.transcript ?? [] }
     var material: [AttachedMaterial] { state?.material ?? [] }
     var projectKey: String { state?.project?.key ?? "" }
     var hasProject: Bool { state?.project != nil }

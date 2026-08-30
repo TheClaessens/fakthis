@@ -8,6 +8,11 @@ struct Workbench: View {
     var model: WindowModel
     var draft: Draft
 
+    /// Whether the conversation is a spine. The surface owns it rather than the column, because
+    /// Rewrite has to be able to open with it already collapsed — Update does not require
+    /// Generate — and Rewrite is its own ticket. Create opens with it open.
+    @State private var conversationCollapsed = false
+
     var body: some View {
         HStack(spacing: 0) {
             rail.frame(width: 262)
@@ -15,7 +20,7 @@ struct Workbench: View {
             DraftColumn(model: model, draft: draft)
                 .frame(minWidth: 460, maxWidth: .infinity)
             Divider()
-            conversation.frame(width: 316)
+            ConversationColumn(model: model, collapsed: $conversationCollapsed)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -54,24 +59,6 @@ struct Workbench: View {
             Spacer(minLength: 0)
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    // MARK: - Conversation
-
-    /// The column exists from the moment the Draft does, because it is where the agent's turns
-    /// and the PM's answers go. It has nothing to render yet: `Session` persists a transcript
-    /// but does not expose one, which is #30's gap and not something the window may invent.
-    private var conversation: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ColumnTitle("Conversation")
-            Spacer()
-            Text("Nothing said yet.")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .frame(maxWidth: .infinity)
-            Spacer()
-        }
         .background(Color(nsColor: .controlBackgroundColor))
     }
 }
@@ -283,10 +270,14 @@ struct DraftColumn: View {
     }
 }
 
-struct ColumnTitle: View {
+struct ColumnTitle<Accessory: View>: View {
     var text: String
+    @ViewBuilder var accessory: () -> Accessory
 
-    init(_ text: String) { self.text = text }
+    init(_ text: String, @ViewBuilder accessory: @escaping () -> Accessory) {
+        self.text = text
+        self.accessory = accessory
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -297,11 +288,20 @@ struct ColumnTitle: View {
                     .textCase(.uppercase)
                     .foregroundStyle(.secondary)
                 Spacer()
+                accessory()
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .padding(.vertical, 5)
+            // Fixed, so a title carrying a control still lines up across the three columns.
+            .frame(height: 33)
             Divider()
         }
+    }
+}
+
+extension ColumnTitle where Accessory == EmptyView {
+    init(_ text: String) {
+        self.init(text) { EmptyView() }
     }
 }
 
