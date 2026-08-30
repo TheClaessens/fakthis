@@ -13,7 +13,13 @@ import Fakthis
 @Observable
 final class WindowModel {
     private(set) var state: Session.State?
-    private(set) var generating = false
+    /// True while the window is waiting on `Session` for a press that takes a round trip — a
+    /// Generate, a reshape, a Submit and the upload that follows it.
+    private(set) var working = false
+    /// Set when a Submit came back without a Ticket. §15: an unreachable Jira leaves the Draft
+    /// exactly as it was and the PM retries — but a press that does nothing at all is worse than
+    /// the failure, so the window says it.
+    private(set) var submitRefused = false
     private(set) var failure: String?
 
     private let session: Session
@@ -29,6 +35,7 @@ final class WindowModel {
     }
 
     func perform(_ intent: Session.Intent) async {
+        submitRefused = false
         await run { try await $0.perform(intent) }
     }
 
@@ -39,9 +46,31 @@ final class WindowModel {
     /// Generate is a separate press. The field is already `Session`'s, so this commits nothing —
     /// it only asks for a Draft.
     func generate() async {
-        generating = true
-        defer { generating = false }
-        await perform(.generate)
+        await whileWorking { await perform(.generate) }
+    }
+
+    /// Submit creates the Jira issue immediately — no queue, no approval step — and the same
+    /// press carries the media upload that follows it, which is why this is the one press the
+    /// window waits on.
+    func submit() async {
+        await whileWorking { await perform(.submit) }
+        submitRefused = submitted == nil
+    }
+
+    /// Reshaping the Draft against another template is a round trip to the agent, so it waits
+    /// the same way Generate does.
+    func changeTicketType(_ ticketType: TicketType) async {
+        await whileWorking { await perform(.changeTicketType(ticketType)) }
+    }
+
+    func retryUploads() async {
+        await whileWorking { await perform(.retryUploads) }
+    }
+
+    private func whileWorking(_ body: () async -> Void) async {
+        working = true
+        defer { working = false }
+        await body()
     }
 
     private func run(_ body: (Session) async throws -> Session.State) async {
@@ -56,6 +85,22 @@ final class WindowModel {
     // MARK: - What the window reads
 
     var draft: Draft? { state?.draft }
+    var submitted: SubmittedTicket? { state?.submitted }
+    /// The Draft stops being an editor the moment the Jira issue exists (§4). `Session` owns
+    /// that rule; the window reads its answer rather than deriving one from the key.
+    var editable: Bool { submitted == nil }
+    /// The media Jira will actually be sent. A file Jira refused at attach time is kept with the
+    /// Draft but never uploaded (§7), so counting it here would make the upload step say a file
+    /// reached the Ticket that never did.
+    var media: [AttachedMaterial] { material.filter { $0.isMedia && !$0.blockedFromUpload } }
+    var mediaBlockedFromUpload: [String] {
+        material.filter { $0.isMedia && $0.blockedFromUpload }.map(\.filename)
+    }
+    /// A Batch is Submitted and finished as one, so a single Draft inside it cannot be the thing
+    /// that starts the next one. `Session` refuses `.newDraft` there; the window does not offer
+    /// it rather than offering a press that does nothing.
+    var canStartANewDraft: Bool { submitted != nil && failedUploads.isEmpty && state?.batch == nil }
+    var failedUploads: [String] { state?.failedUploads ?? [] }
     var field: String { state?.field ?? "" }
     var material: [AttachedMaterial] { state?.material ?? [] }
     var projectKey: String { state?.project?.key ?? "" }

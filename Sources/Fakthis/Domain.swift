@@ -1,6 +1,6 @@
 import Foundation
 
-public enum TicketType: String, Sendable, Codable, Equatable {
+public enum TicketType: String, CaseIterable, Sendable, Codable, Equatable {
     case story
     case bug
     case chore
@@ -34,6 +34,29 @@ public struct Settings: Equatable, Sendable, Codable {
         self.email = email
         self.provider = provider
         self.modelId = modelId
+    }
+}
+
+extension Settings {
+    /// Where a Ticket lives once it exists. Jira is the system of record, so this is the whole
+    /// of what Fakthis keeps of a Submitted Ticket: §3 holds `site` as the Jira Cloud hostname,
+    /// and `/browse/{key}` is the page a developer opens.
+    public func ticketURL(_ key: TicketKey) -> URL? {
+        URL(string: "https://\(site)/browse/\(key.value)")
+    }
+}
+
+/// The Ticket a Draft became. One fact answers two questions the window keeps asking — where
+/// the work landed, and whether this is still an editor: §4 says that once the Jira issue
+/// exists the Draft folder is an upload queue plus the key, never an editor again.
+public struct SubmittedTicket: Equatable, Sendable {
+    public var key: TicketKey
+    /// Absent only when Fakthis has no site to build it from, which cannot happen after setup.
+    public var url: URL?
+
+    public init(key: TicketKey, url: URL?) {
+        self.key = key
+        self.url = url
     }
 }
 
@@ -131,26 +154,37 @@ public struct Material: Equatable, Sendable {
     }
 
     /// What is attached, without the bytes. A snapshot that carried an 84 MB recording would
-    /// be copied every time the window read state.
-    public var attached: AttachedMaterial {
-        AttachedMaterial(filename: filename, mimeType: mimeType)
+    /// be copied every time the window read state. Only `Session` knows whether Jira refused
+    /// the file, so it fills `blockedFromUpload` in.
+    public func attached(blockedFromUpload: Bool = false) -> AttachedMaterial {
+        AttachedMaterial(
+            filename: filename,
+            mimeType: mimeType,
+            blockedFromUpload: blockedFromUpload
+        )
     }
 
-    public var isText: Bool { attached.isText }
-    public var isScreenshot: Bool { attached.isScreenshot }
-    public var isVideo: Bool { attached.isVideo }
-    public var isMedia: Bool { attached.isMedia }
+    public var isText: Bool { attached().isText }
+    public var isScreenshot: Bool { attached().isScreenshot }
+    public var isVideo: Bool { attached().isVideo }
+    public var isMedia: Bool { attached().isMedia }
 }
 
-/// Material as a reader sees it: the name and the kind, which is everything a chip on the
-/// composer needs and everything routing is decided on. The bytes stay behind `Session`.
+/// Material as a reader sees it: the name, the kind, and whether Jira will take it — which is
+/// everything a chip on the composer needs and everything routing is decided on. The bytes stay
+/// behind `Session`.
 public struct AttachedMaterial: Equatable, Sendable {
     public var filename: String
     public var mimeType: String
+    /// Oversize, or attachments disabled: `Session` keeps the file and never tries to upload it
+    /// (§7). Without this the window would count it among the media that reached the Ticket and
+    /// say a file was uploaded that Jira never received.
+    public var blockedFromUpload: Bool
 
-    public init(filename: String, mimeType: String) {
+    public init(filename: String, mimeType: String, blockedFromUpload: Bool = false) {
         self.filename = filename
         self.mimeType = mimeType
+        self.blockedFromUpload = blockedFromUpload
     }
 
     public var isText: Bool { mimeType.hasPrefix("text/") }

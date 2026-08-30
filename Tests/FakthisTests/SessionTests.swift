@@ -4061,3 +4061,228 @@ private struct DiskProject: Codable {
         ]
     )
 }
+
+// MARK: - #32 The Draft is editable, and Submit writes the Ticket
+
+@Test func handEditsToTheDraftAreWhatSubmitWrites() async throws {
+    let harness = Harness(ticketTypeMapping: [.story: "Task"])
+    _ = try await harness.generateStory()
+
+    let title = "As a warehouse picker I want the bin scan enforced so that I pick the right bin"
+    let description = "On the **pick screen** the scan is required.\n\n---\n\n- Scan is enforced"
+    _ = try await harness.session.perform(.editTitle(title))
+    _ = try await harness.session.perform(.editShortLabel("enforce bin scan"))
+    let edited = try await harness.session.perform(.editDescription(description))
+    #expect(edited.draft?.title == title)
+    #expect(edited.draft?.shortLabel == "enforce bin scan")
+    #expect(edited.draft?.description == description)
+
+    let state = try await harness.session.perform(.submit)
+    let ticket = try #require(await harness.jira.created.first)
+    #expect(ticket.title == title)
+    #expect(ticket.descriptionWiki.contains("*pick screen*"))
+    #expect(ticket.descriptionWiki.contains("* Scan is enforced"))
+    #expect(state.catalog.rows.first?.shortLabel == "enforce bin scan")
+}
+
+@Test func handEditsSurviveARestart() async throws {
+    let harness = Harness()
+    _ = try await harness.generateStory()
+    _ = try await harness.session.perform(.editTitle("As a picker I want it fixed so that I pick"))
+    _ = try await harness.session.perform(.editShortLabel("bin scan"))
+    _ = try await harness.session.perform(.editDescription("Edited body.\n\n---\n\n- Done"))
+
+    let state = try await harness.reopen().state()
+    #expect(state.draft?.title == "As a picker I want it fixed so that I pick")
+    #expect(state.draft?.shortLabel == "bin scan")
+    #expect(state.draft?.description == "Edited body.\n\n---\n\n- Done")
+}
+
+/// The section is composed from the agent's open questions, so an edit must never be able to put
+/// a copy of it into the description — the next compose would sit a second one on top.
+@Test func editingTheDescriptionNeverBakesInTheOpenQuestionsSection() async throws {
+    let harness = Harness()
+    _ = try await harness.generateStory(
+        openQuestions: ["What should happen when the bin scan fails?"]
+    )
+    let generated = try #require(try await harness.session.state().draft)
+    #expect(generated.descriptionWithOpenQuestions.contains(Draft.openQuestionsPreamble))
+    #expect(!generated.description.contains(Draft.openQuestionsPreamble))
+
+    let edited = try await harness.session.perform(
+        .editDescription(generated.description + "\n\nOne more paragraph.")
+    )
+    let draft = try #require(edited.draft)
+    #expect(!draft.description.contains(Draft.openQuestionsPreamble))
+    #expect(
+        draft.descriptionWithOpenQuestions.ranges(of: Draft.openQuestionsPreamble).count == 1
+    )
+}
+
+@Test func anUploadQueueRefusesFurtherEdits() async throws {
+    let harness = Harness()
+    _ = try await harness.generateStory()
+    let submitted = try await harness.session.perform(.submit)
+    let draft = try #require(submitted.draft)
+
+    let afterTitle = try await harness.session.perform(.editTitle("As a thief I want to edit"))
+    let afterShortLabel = try await harness.session.perform(.editShortLabel("stolen"))
+    let afterDescription = try await harness.session.perform(.editDescription("stolen body"))
+    #expect(afterTitle.draft?.title == draft.title)
+    #expect(afterShortLabel.draft?.shortLabel == draft.shortLabel)
+    #expect(afterDescription.draft?.description == draft.description)
+}
+
+@Test func submitPutsTheKeyAndTheTicketLinkOnState() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(
+        .saveCredentials(
+            Settings(
+                site: "example.atlassian.net",
+                email: "pm@example.com",
+                provider: "anthropic",
+                modelId: "claude"
+            ),
+            jiraToken: "token",
+            modelKey: "key"
+        )
+    )
+    _ = try await harness.generateStory()
+    #expect(try await harness.session.state().submitted == nil)
+
+    let state = try await harness.session.perform(.submit)
+    let submitted = try #require(state.submitted)
+    #expect(submitted.key == TicketKey("FAK-1"))
+    #expect(submitted.url == URL(string: "https://example.atlassian.net/browse/FAK-1"))
+}
+
+/// A rewrite Draft carries a key from the start and is still an editor, so the key alone cannot
+/// be what says a Draft has been Submitted.
+@Test func aRewriteDraftBoundToAKeyIsNotASubmittedTicket() async throws {
+    let harness = Harness()
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: "Scan tote before pick",
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "The live description is messy.",
+                comments: []
+            )
+        ],
+        componentNames: []
+    )
+    let state = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(state.draft?.key == TicketKey("FAK-231"))
+    #expect(state.submitted == nil)
+}
+
+@Test func aNewDraftAfterAFinishedQueueReturnsTheWindowToTheFrontDoor() async throws {
+    let harness = Harness()
+    _ = try await harness.generateStory()
+    _ = try await harness.session.perform(
+        .attachMaterial(Material(filename: "shot.png", mimeType: "image/png", data: Data([0x1])))
+    )
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.submitted?.key == TicketKey("FAK-1"))
+    #expect(submitted.failedUploads.isEmpty)
+
+    let fresh = try await harness.session.perform(.newDraft)
+    #expect(fresh.draft == nil)
+    #expect(fresh.submitted == nil)
+    #expect(fresh.field == "")
+    #expect(fresh.material.isEmpty)
+    #expect(fresh.transcript.isEmpty)
+    #expect(try await harness.reopen().state().draft == nil)
+}
+
+@Test func aNewDraftIsRefusedWhileThereIsStillSomethingOnlyFakthisHas() async throws {
+    let harness = Harness()
+    _ = try await harness.generateStory()
+
+    let unsubmitted = try await harness.session.perform(.newDraft)
+    #expect(unsubmitted.draft?.title == StoryReply.title)
+
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "clip.mov", mimeType: "video/quicktime", data: Data([0x1]))
+        )
+    )
+    await harness.jira.setFailUploads(true)
+    let queued = try await harness.session.perform(.submit)
+    #expect(queued.failedUploads == ["clip.mov"])
+
+    let refused = try await harness.session.perform(.newDraft)
+    #expect(refused.draft?.key == TicketKey("FAK-1"))
+    #expect(refused.failedUploads == ["clip.mov"])
+
+    await harness.jira.setFailUploads(false)
+    _ = try await harness.session.perform(.retryUploads)
+    #expect(try await harness.session.perform(.newDraft).draft == nil)
+}
+
+/// The only queue that survives a restart is one still holding a file, because a finished one
+/// deletes its folder. Reopened, it is still the Ticket and still not an editor.
+@Test func aRestartedUploadQueueIsStillTheTicketAndStillRefusesEdits() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(
+        .saveCredentials(
+            Settings(
+                site: "example.atlassian.net",
+                email: "pm@example.com",
+                provider: "anthropic",
+                modelId: "claude"
+            ),
+            jiraToken: "token",
+            modelKey: "key"
+        )
+    )
+    _ = try await harness.generateStory()
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "clip.mov", mimeType: "video/quicktime", data: Data([0x1]))
+        )
+    )
+    await harness.jira.setFailUploads(true)
+    let queued = try await harness.session.perform(.submit)
+    #expect(queued.failedUploads == ["clip.mov"])
+
+    let restarted = harness.reopen()
+    let reopened = try await restarted.state()
+    #expect(reopened.submitted?.key == TicketKey("FAK-1"))
+    #expect(reopened.submitted?.url == URL(string: "https://example.atlassian.net/browse/FAK-1"))
+    #expect(reopened.failedUploads == ["clip.mov"])
+
+    let edited = try await restarted.perform(.editTitle("As a thief I want to edit after Submit"))
+    #expect(edited.draft?.title == StoryReply.title)
+}
+
+/// A file Jira refused at attach time is kept with the Draft and never uploaded, so the window
+/// has to be able to tell it apart from one that reached the Ticket.
+@Test func materialJiraWillNotTakeIsMarkedBlockedOnState() async throws {
+    let harness = Harness()
+    await harness.jira.setAttachmentPolicy(AttachmentPolicy(enabled: true, uploadLimit: 4))
+    _ = try await harness.generateStory()
+    let state = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "huge.mov",
+                mimeType: "video/quicktime",
+                data: Data(repeating: 0x1, count: 64)
+            )
+        )
+    )
+    let attached = try #require(state.material.first)
+    #expect(attached.filename == "huge.mov")
+    #expect(attached.blockedFromUpload)
+
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.submitted?.key == TicketKey("FAK-1"))
+    #expect(await harness.jira.uploaded.isEmpty)
+    #expect(submitted.failedUploads.isEmpty)
+}

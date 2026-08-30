@@ -9,7 +9,11 @@ public actor Session {
         case generate
         case send
         case changeTicketType(TicketType)
+        case editTitle(String)
+        case editShortLabel(String)
+        case editDescription(String)
         case submit
+        case newDraft
         case retryUploads
         case skipFailedUploads
         case saveCredentials(Settings, jiraToken: String, modelKey: String)
@@ -65,6 +69,10 @@ public actor Session {
         public var rewrite: Rewrite?
         public var rewriteError: String?
         public var batch: Batch?
+        /// Present exactly while the Draft has stopped being an editor: Submit has created the
+        /// Jira issue and the folder is an upload queue plus the key. A rewrite Draft carries a
+        /// key from the start and is still an editor, so it is absent there.
+        public var submitted: SubmittedTicket?
     }
 
     private var project: Project?
@@ -138,9 +146,20 @@ public actor Session {
         case .changeTicketType(let ticketType):
             startBackgroundRefreshIfStale()
             try await changeTicketType(ticketType)
+        case .editTitle(let title):
+            startBackgroundRefreshIfStale()
+            try edit { $0.title = title }
+        case .editShortLabel(let shortLabel):
+            startBackgroundRefreshIfStale()
+            try edit { $0.shortLabel = shortLabel }
+        case .editDescription(let description):
+            startBackgroundRefreshIfStale()
+            try edit { $0.description = description }
         case .submit:
             startBackgroundRefreshIfStale()
             try await submit()
+        case .newDraft:
+            try newDraft()
         case .retryUploads:
             startBackgroundRefreshIfStale()
             try await retryUploads()
@@ -791,6 +810,46 @@ public actor Session {
             instruction: sendInstruction,
             screenshots: []
         )
+    }
+
+    /// A hand-edit of the Draft, in place. The window holds no second copy — it sends what the
+    /// PM typed and reads the Draft back — so the string on screen and the string Submit writes
+    /// are the same one, and the structural check re-reads the edited Draft on the next snapshot.
+    ///
+    /// Only `description` is edited, never `descriptionWithOpenQuestions`: the open-questions
+    /// section is composed from the questions the agent asked, so editing the composed string
+    /// would bake a stale copy of it into the description.
+    ///
+    /// Refused once the Jira issue exists. §4: the folder is an upload queue plus the key from
+    /// then on, not an editor.
+    private func edit(_ change: (inout Draft) -> Void) throws {
+        guard var draft, !isUploadQueue else { return }
+        change(&draft)
+        self.draft = draft
+        try persistDraft()
+    }
+
+    /// Done with the Ticket that was just Submitted: the window goes back to the front door.
+    ///
+    /// Only reachable once the Jira issue exists **and** the upload queue is empty, because the
+    /// queue is the one thing here that is not also in Jira. An unsubmitted Draft is never
+    /// discarded this way, and neither is a Batch — its siblings are the rail's, not this
+    /// Draft's.
+    private func newDraft() throws {
+        guard isUploadQueue, failedUploads.isEmpty, batch == nil else { return }
+        draft = nil
+        draftId = nil
+        field = ""
+        brainDump = ""
+        material = []
+        transcript = []
+        blockedUploads = []
+        materialWarnings = []
+        duplicateInterrupt = nil
+        related = []
+        fetched = nil
+        rewriteError = nil
+        fieldByDraft = [:]
     }
 
     private func changeTicketType(_ ticketType: TicketType) async throws {
@@ -1965,7 +2024,7 @@ public actor Session {
             field: field,
             draft: draft,
             transcript: transcript,
-            material: material.map(\.attached),
+            material: material.map { $0.attached(blockedFromUpload: blockedUploads.contains($0.filename)) },
             catalog: catalog,
             catalogRefreshFailed: catalogRefreshFailed,
             aneCompileInProgress: aneCompileInProgress,
@@ -1980,8 +2039,14 @@ public actor Session {
             status: status,
             rewrite: rewrite,
             rewriteError: rewriteError,
-            batch: batch
+            batch: batch,
+            submitted: submittedTicket()
         )
+    }
+
+    private func submittedTicket() -> SubmittedTicket? {
+        guard isUploadQueue, let key = draft?.key else { return nil }
+        return SubmittedTicket(key: key, url: settings?.ticketURL(key))
     }
 }
 

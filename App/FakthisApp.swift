@@ -40,6 +40,7 @@ struct FakthisWindow: View {
             }
             let model = WindowModel(session: session)
             await model.open()
+            if FixtureProject.submitOnOpen { await model.submit() }
             self.model = model
         }
     }

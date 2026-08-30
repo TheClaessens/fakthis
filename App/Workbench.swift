@@ -78,8 +78,11 @@ struct Workbench: View {
 
 /// The Draft column is **bounded with a fixed footer**. It is the constraint that chose the
 /// window's shape: Submit and the rewrite diff have to be reachable at any window height and any
-/// description length, so the description scrolls inside the column and the footer does not move.
-/// Later tickets hang Submit, the diff and the gutter off this structure.
+/// description length, so the Draft scrolls inside the column and the footer does not move.
+///
+/// The column is the editor until Submit and the upload queue after it. §4: once the Jira issue
+/// exists the folder is a queue plus the key, never an editor again — so the fields stop taking
+/// edits and the footer stops offering Submit and starts naming the Ticket.
 struct DraftColumn: View {
     var model: WindowModel
     var draft: Draft
@@ -90,12 +93,13 @@ struct DraftColumn: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     identity
-                    Text(draft.title)
-                        .font(.system(size: 18, weight: .semibold))
-                        .fixedSize(horizontal: false, vertical: true)
+                    title
                     Divider()
-                    MarkdownBlocks(markdown: draft.descriptionWithOpenQuestions)
-                        .font(.system(size: 12.5))
+                    DescriptionEditor(
+                        draft: draft,
+                        editable: model.editable && !model.working,
+                        commit: { await model.perform(.editDescription($0)) }
+                    )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 18)
@@ -105,39 +109,177 @@ struct DraftColumn: View {
             footer
         }
         .background(Color(nsColor: .controlBackgroundColor))
+        .overlay {
+            if model.working {
+                ProgressView().controlSize(.large)
+            }
+        }
     }
 
     /// Ticket type renders inline with the short label. They are the two things checked first,
-    /// and a Story title beginning "As a" is useless for either job.
+    /// and a Story title beginning "As a" is useless for either job. Changing the type reshapes
+    /// the Draft against the new template and keeps Material and the answers already given —
+    /// which is `Session`'s rule, not something this control repeats.
     private var identity: some View {
         HStack(spacing: 8) {
-            Text(draft.ticketType.label)
-                .font(.system(size: 10, weight: .semibold))
-                .textCase(.uppercase)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color(nsColor: .windowBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(Color(nsColor: .separatorColor))
+            if model.editable {
+                Picker("Ticket type", selection: ticketType) {
+                    ForEach(TicketType.allCases, id: \.self) { type in
+                        Text(type.label).tag(type)
+                    }
                 }
-            Text(draft.shortLabel)
-                .font(.system(size: 12.5, weight: .medium))
-            Spacer(minLength: 0)
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(model.working)
+            } else {
+                Text(draft.ticketType.label)
+                    .font(.system(size: 10, weight: .semibold))
+                    .textCase(.uppercase)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(Color(nsColor: .separatorColor))
+                    }
+            }
+
+            InPlaceEdit(
+                value: draft.shortLabel,
+                commit: { await model.perform(.editShortLabel($0)) }
+            ) { text in
+                TextField("Short label", text: text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .disabled(!model.editable || model.working)
+            }
         }
     }
 
+    private var ticketType: Binding<TicketType> {
+        Binding(
+            get: { draft.ticketType },
+            set: { type in
+                guard type != draft.ticketType else { return }
+                Task { await model.changeTicketType(type) }
+            }
+        )
+    }
+
+    private var title: some View {
+        InPlaceEdit(value: draft.title, commit: { await model.perform(.editTitle($0)) }) { text in
+            TextField("Title", text: text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 18, weight: .semibold))
+                .disabled(!model.editable || model.working)
+        }
+    }
+
+    // MARK: - Footer
+
+    /// Fixed, so Submit is on screen whatever the description does above it. After Submit the
+    /// same strip names the Ticket and carries the upload step.
     private var footer: some View {
-        HStack {
-            Text(draft.key?.value ?? "Draft in \(model.projectKey)")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-            Spacer()
+        VStack(alignment: .leading, spacing: 8) {
+            if let submitted = model.submitted {
+                submittedRow(submitted)
+                uploadStep(key: submitted.key)
+            } else {
+                submitRow
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var submitRow: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Draft in \(model.projectKey)")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                if model.submitRefused {
+                    Text("Jira did not answer. The Draft is unchanged — Submit again.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            Button {
+                Task { await model.submit() }
+            } label: {
+                Label("Submit", systemImage: "arrow.up.forward.square")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.working)
+        }
+    }
+
+    /// The key and the link, first: the Jira issue exists, and nothing below this line can put it
+    /// at risk. New Draft waits for the queue to empty, because the queue is the one thing here
+    /// that is not also in Jira.
+    private func submittedRow(_ submitted: SubmittedTicket) -> some View {
+        HStack(spacing: 10) {
+            if let url = submitted.url {
+                Link(destination: url) {
+                    Label(submitted.key.value, systemImage: "arrow.up.right.square")
+                }
+                .font(.system(size: 13, weight: .semibold))
+            } else {
+                Text(submitted.key.value).font(.system(size: 13, weight: .semibold))
+            }
+            Spacer()
+            if model.canStartANewDraft {
+                Button("New Draft", systemImage: "plus") {
+                    Task { await model.perform(.newDraft) }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.working)
+            }
+        }
+    }
+
+    /// Media upload is its own step, after the Ticket exists. It can be retried or skipped and
+    /// the Ticket is live either way, which is why it reads below the key rather than above it.
+    @ViewBuilder
+    private func uploadStep(key: TicketKey) -> some View {
+        if !model.mediaBlockedFromUpload.isEmpty {
+            Label(
+                "\(model.mediaBlockedFromUpload.joined(separator: ", ")) was skipped — "
+                    + "Jira would not take it.",
+                systemImage: "exclamationmark.triangle"
+            )
+            .font(.system(size: 10.5))
+            .foregroundStyle(.orange)
+        }
+        if model.media.isEmpty {
+            EmptyView()
+        } else if model.failedUploads.isEmpty {
+            Label("Media uploaded to \(key.value).", systemImage: "checkmark.circle")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+        } else {
+            HStack(spacing: 8) {
+                Label(
+                    "\(model.failedUploads.joined(separator: ", ")) did not upload.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.system(size: 10.5))
+                .foregroundStyle(.orange)
+                Spacer(minLength: 0)
+                Button("Retry") { Task { await model.retryUploads() } }
+                Button("Skip") { Task { await model.perform(.skipFailedUploads) } }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(model.working)
+        }
     }
 }
 
@@ -163,8 +305,8 @@ struct ColumnTitle: View {
     }
 }
 
-/// The Ticket type's own name, fixed by `CONTEXT.md`. It belongs in the library, but the
-/// throwaway prototype target already declares one; it moves there when #40 retires it.
+/// The Ticket type's own name. It belongs in the library, but the throwaway prototype target
+/// already declares one; it moves there when #40 retires it.
 extension TicketType {
     var label: String {
         switch self {

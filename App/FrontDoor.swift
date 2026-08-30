@@ -116,7 +116,7 @@ struct FrontDoor: View {
         }
         .padding(18)
         .overlay {
-            if model.generating {
+            if model.working {
                 ProgressView().controlSize(.large)
             }
         }
@@ -145,7 +145,7 @@ struct FrontDoor: View {
     }
 
     private var canGenerate: Bool {
-        !model.generating
+        !model.working
             && !brainDump.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
