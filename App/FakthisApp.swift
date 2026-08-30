@@ -40,15 +40,18 @@ struct FakthisWindow: View {
     /// that replaces it.
     @ViewBuilder
     private func surface(_ model: WindowModel) -> some View {
-        if model.settings == nil {
-            Setup(model: model)
-        } else if !model.hasProject {
-            ProjectList(model: model)
-        } else if let draft = model.draft {
-            Workbench(model: model, draft: draft)
-        } else {
-            FrontDoor(model: model)
+        Group {
+            if model.settings == nil {
+                Setup(model: model)
+            } else if !model.hasProject {
+                ProjectList(model: model)
+            } else if let draft = model.draft {
+                Workbench(model: model, draft: draft)
+            } else {
+                FrontDoor(model: model)
+            }
         }
+        .task { await model.waitForANECompile() }
     }
 }
 

@@ -758,7 +758,7 @@ public actor Session {
     }
 
     private func startListening() async {
-        guard project != nil, !aneCompileInProgress, status != .listening else { return }
+        guard project != nil, !aneCompileInProgress, status == .yourTurn else { return }
         status = .listening
         await transcriber.beginTake()
     }

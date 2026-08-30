@@ -133,37 +133,42 @@ struct ConversationColumn: View {
     /// **Send is a separate press** (§7.4). Typing revises nothing: the composer is `Session`'s
     /// field and the window pushes every keystroke into it, but only this press asks the agent
     /// for a Draft. The press spends the field, so the answer leaves the composer and joins the
-    /// conversation above it.
+    /// conversation above it. Speak on this composer is hold-to-talk; the take replaces the
+    /// field, and Send still waits for this press.
     private var composer: some View {
         SessionField(model: model) { text in
-            VStack(alignment: .leading, spacing: 8) {
-                TextField("Answer", text: text, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12.5))
-                    .lineLimit(1...6)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 8)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Color(nsColor: .separatorColor))
-                    }
-                    .disabled(model.working)
+            VStack(alignment: .leading, spacing: 0) {
+                VoiceStrip(model: model, gesture: "Hold to talk")
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Answer", text: text, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12.5))
+                        .lineLimit(1...6)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 8)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(Color(nsColor: .separatorColor))
+                        }
+                        .disabled(model.working)
 
-                HStack {
-                    Spacer()
-                    Button {
-                        Task { await model.send() }
-                    } label: {
-                        Label("Send", systemImage: "arrow.up.circle.fill")
+                    HStack {
+                        SpeakHold(model: model)
+                        Spacer()
+                        Button {
+                            Task { await model.send() }
+                        } label: {
+                            Label("Send", systemImage: "arrow.up.circle.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(!canSend(text.wrappedValue))
                     }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!canSend(text.wrappedValue))
                 }
+                .padding(12)
             }
-            .padding(12)
         }
     }
 

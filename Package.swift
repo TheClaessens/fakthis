@@ -24,7 +24,19 @@ let package = Package(
         .executableTarget(
             name: "FakthisApp",
             dependencies: ["Fakthis"],
-            path: "App"
+            path: "App",
+            exclude: ["Info.plist"],
+            // `swift run` is not an .app bundle, so TCC will not find a usage string unless
+            // it is embedded in the binary. Without this, beginTake fails silently and a
+            // Speak press never lands a take.
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "App/Info.plist",
+                ])
+            ]
         ),
         // THROWAWAY. UI-shell prototype, branch prototype/ui-shell. Not shipped.
         .executableTarget(

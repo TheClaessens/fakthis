@@ -30,8 +30,8 @@ enum Live {
                 send: { try await URLSession.shared.data(for: $0) }
             ),
             // Weights ship in the app bundle and download nothing on first run (§2). Without
-            // them the engines fail to load and voice does not work — which is #36's business,
-            // not this ticket's; the compile status is honest either way.
+            // them the engines fail to load and a Speak press transcribes nothing — the
+            // compile status is honest either way.
             transcriber: BundledTranscriber.production(
                 models: Bundle.main.resourceURL ?? Bundle.main.bundleURL
             ),

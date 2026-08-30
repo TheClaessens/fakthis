@@ -92,7 +92,37 @@ final class WindowModel {
     /// Generate is a separate press. The field is already `Session`'s, so this commits nothing —
     /// it only asks for a Draft.
     func generate() async {
-        await whileWorking { await perform(.generate) }
+        await whileWorking { await self.followStatus { await self.perform(.generate) } }
+    }
+
+    /// Brain-dump is a toggle: one press starts the take, the next stops it and the words land
+    /// in the field. Chat is hold-to-talk, same two intents, so both gestures enqueue here — a
+    /// release that raced the press would hit `stopListening` while status was still `yourTurn`
+    /// and leave the take running with nothing to commit it.
+    func toggleListening() {
+        enqueueVoice { [self] in
+            switch status {
+            case .listening:
+                await self.followStatus { await self.perform(.stopListening) }
+            case .yourTurn where canStartListening:
+                await self.followStatus { await self.perform(.startListening) }
+            default:
+                break
+            }
+        }
+    }
+
+    /// Hold is the chat gesture. The visual lives on the control; this only starts and stops so
+    /// a rebuild of the strip cannot be what commits the take.
+    func holdToTalk(_ down: Bool) {
+        enqueueVoice { [self] in
+            if down {
+                guard canStartListening else { return }
+                await self.followStatus { await self.perform(.startListening) }
+            } else if status == .listening {
+                await self.followStatus { await self.perform(.stopListening) }
+            }
+        }
     }
 
     /// Submit creates the Jira issue immediately — no queue, no approval step — and the same
@@ -107,13 +137,15 @@ final class WindowModel {
     /// already `Session`'s field — it only asks for the Draft to be revised from what the field
     /// holds, and `Session` spends the field doing it.
     func send() async {
-        await whileWorking { await perform(.send) }
+        await whileWorking { await self.followStatus { await self.perform(.send) } }
     }
 
     /// Reshaping the Draft against another template is a round trip to the agent, so it waits
     /// the same way Generate does.
     func changeTicketType(_ ticketType: TicketType) async {
-        await whileWorking { await perform(.changeTicketType(ticketType)) }
+        await whileWorking {
+            await self.followStatus { await self.perform(.changeTicketType(ticketType)) }
+        }
     }
 
     func retryUploads() async {
@@ -123,13 +155,39 @@ final class WindowModel {
     /// The second pass again, over the description the PM edited. A round trip to the agent, so
     /// it waits the way Generate does — and it is a press, never silent (§7.3).
     func regenerateDefinitionOfDone() async {
-        await whileWorking { await perform(.regenerateDefinitionOfDone) }
+        await whileWorking {
+            await self.followStatus { await self.perform(.regenerateDefinitionOfDone) }
+        }
     }
 
     private func whileWorking(_ body: () async -> Void) async {
         working = true
         defer { working = false }
         await body()
+    }
+
+    /// `perform` returns the snapshot at the end of a wait. The strip has to show transcribing
+    /// and agent thinking *during* that wait, so this reads `state()` on the actor while the
+    /// intent is still in flight — the same hop `waitForANECompile` already makes, because
+    /// `Session` yields at the transcriber and the model.
+    private func followStatus(_ body: @escaping () async -> Void) async {
+        let poll = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(80))
+                await self.open()
+            }
+        }
+        await body()
+        poll.cancel()
+    }
+
+    private var voiceQueue: Task<Void, Never>?
+
+    private func enqueueVoice(_ body: @escaping () async -> Void) {
+        voiceQueue = Task { [voiceQueue] in
+            await voiceQueue?.value
+            await body()
+        }
     }
 
     private func run(_ body: (Session) async throws -> Session.State) async {
@@ -168,6 +226,14 @@ final class WindowModel {
     var canStartANewDraft: Bool { submitted != nil && failedUploads.isEmpty && state?.batch == nil }
     var failedUploads: [String] { state?.failedUploads ?? [] }
     var field: String { state?.field ?? "" }
+    /// The phase the strip on the field reads. Four values, never a sound: listening /
+    /// transcribing / agent thinking / your turn.
+    var status: Session.Status { state?.status ?? .yourTurn }
+    /// Speak is offered in `yourTurn` once the transcriber is compiled. Disabled while the
+    /// agent is thinking, not while listening — Stop has to stay reachable.
+    var canStartListening: Bool {
+        hasProject && !aneCompileInProgress && status == .yourTurn && !working
+    }
     /// The chat, in the order it was said. `Session` has always written it to the Draft folder;
     /// the window renders what it reads back and keeps no turns of its own, which is why the
     /// conversation survives a restart the same way the Draft does.

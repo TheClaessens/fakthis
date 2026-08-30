@@ -1713,6 +1713,22 @@ import Fakthis
     #expect(done.draft?.title == StoryReply.title)
 }
 
+@Test func aTakeDoesNotStartWhileTheAgentIsThinking() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    await harness.model.setHoldComplete(true)
+
+    async let generated = harness.session.perform(.generate)
+    try await waitUntil {
+        try await harness.session.state().status == .agentThinking
+    }
+    let ignored = try await harness.session.perform(.startListening)
+    #expect(ignored.status == .agentThinking)
+
+    await harness.model.setHoldComplete(false)
+    _ = try await generated
+}
+
 @Test func aFailedTakeLeavesTheFieldAndReturnsToYourTurn() async throws {
     let harness = Harness()
     await harness.transcriber.enqueueTake("this must not land")

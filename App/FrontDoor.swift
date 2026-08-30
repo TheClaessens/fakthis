@@ -2,8 +2,8 @@ import SwiftUI
 import Fakthis
 
 /// What the window is before Generate: one field sized to a spoken brain-dump, the Material
-/// that
-/// produced it as chips on the composer, and Generate.
+/// that produced it as chips on the composer, and Generate. Voice is an input method into that
+/// same field — Speak toggles a take that appends — and Generate stays a separate press.
 ///
 /// There is no Submit — absent, not disabled, because a disabled Submit still answers "can I
 /// submit yet?". There is no Ticket type control: the agent infers the type at Generate, and a
@@ -116,51 +116,50 @@ struct FrontDoor: View {
     // MARK: - Composer
 
     private func composer(_ brainDump: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("What is the work?")
-                .font(.system(size: 15, weight: .semibold))
+        VStack(alignment: .leading, spacing: 0) {
+            VoiceStrip(model: model, gesture: "Press to start / stop")
+            VStack(alignment: .leading, spacing: 12) {
+                Text("What is the work?")
+                    .font(.system(size: 15, weight: .semibold))
 
-            /// Sixty spoken words, not a column-height box. A field the height of the window
-            /// makes it look like Fakthis is waiting for an essay.
-            BrainDumpField(text: brainDump, attach: attach)
-                .frame(height: 150)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(Color(nsColor: .separatorColor))
-                }
-                .overlay(alignment: .topLeading) {
-                    if brainDump.wrappedValue.isEmpty {
-                        Text("Say what the work is. Drop, paste or attach what produced it.")
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 12)
-                            .allowsHitTesting(false)
+                /// Sixty spoken words, not a column-height box. A field the height of the window
+                /// makes it look like Fakthis is waiting for an essay.
+                BrainDumpField(text: brainDump, attach: attach)
+                    .frame(height: 150)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(Color(nsColor: .separatorColor))
                     }
-                }
+                    .overlay(alignment: .topLeading) {
+                        if brainDump.wrappedValue.isEmpty {
+                            Text("Say what the work is. Drop, paste or attach what produced it.")
+                                .font(.system(size: 13.5))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 12)
+                                .allowsHitTesting(false)
+                        }
+                    }
 
-            chips
+                chips
 
-            HStack {
-                Spacer()
-                Button {
-                    Task { await model.generate() }
-                } label: {
-                    Label("Generate", systemImage: "sparkles")
+                HStack {
+                    SpeakToggle(model: model)
+                    Spacer()
+                    Button {
+                        Task { await model.generate() }
+                    } label: {
+                        Label("Generate", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canGenerate(brainDump.wrappedValue))
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!canGenerate(brainDump.wrappedValue))
             }
-        }
-        .padding(18)
-        .overlay {
-            if model.working {
-                ProgressView().controlSize(.large)
-            }
+            .padding(18)
         }
     }
 
