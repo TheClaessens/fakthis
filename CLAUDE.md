@@ -4,6 +4,12 @@ A local desktop app for writing Jira tickets. A PM speaks or types a brain-dump,
 
 Read `CONTEXT.md` for the domain glossary before naming anything.
 
+## Running it
+
+`swift run FakthisApp`. The ASR weights are too large for git and are not in the tree, so a
+fresh clone transcribes nothing: Speak records, Stop returns an empty take. Fetch the whisper
+fallback first with `scripts/fetch-models.sh` (see ADR-0003 for why both engines are local).
+
 ## Agent skills
 
 ### Issue tracker

@@ -23,6 +23,24 @@ public actor MicrophoneTakeCapture: TakeCapture {
             let converter = AVAudioConverter(from: hardware, to: target)
         else { return }
         self.engine = engine
+        installTap(on: input, hardware: hardware, target: target, converter: converter)
+        do {
+            try engine.start()
+        } catch {
+            stopEngine()
+        }
+    }
+
+    // AVFAudio calls the tap block on its own realtime thread. Written inline in an
+    // actor-isolated method the block would inherit this actor's isolation, and the very
+    // first buffer aborts the process on Swift's executor check, so it is installed from
+    // nonisolated code and hands each chunk back over `append`.
+    private nonisolated func installTap(
+        on input: AVAudioInputNode,
+        hardware: AVAudioFormat,
+        target: AVAudioFormat,
+        converter: AVAudioConverter
+    ) {
         input.installTap(onBus: 0, bufferSize: 4096, format: hardware) { buffer, _ in
             let ratio = target.sampleRate / hardware.sampleRate
             let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up) + 32)
@@ -41,11 +59,6 @@ public actor MicrophoneTakeCapture: TakeCapture {
             guard error == nil, let channel = converted.floatChannelData?[0] else { return }
             let chunk = Array(UnsafeBufferPointer(start: channel, count: Int(converted.frameLength)))
             Task { await self.append(chunk) }
-        }
-        do {
-            try engine.start()
-        } catch {
-            stopEngine()
         }
     }
 
