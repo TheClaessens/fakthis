@@ -74,23 +74,58 @@ struct DraftColumn: View {
     var model: WindowModel
     var draft: Draft
 
+    /// The gutter is the resting state and what the window opens with. The panel is temporary,
+    /// and costs the Draft width while it is up (`Prototype/FINDINGS.md` 16), so it closes again
+    /// the moment there is nothing left to rest in the gutter.
+    @State private var signalsOpen = false
+
     var body: some View {
         VStack(spacing: 0) {
             ColumnTitle("Draft")
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    identity
-                    title
-                    Divider()
-                    DescriptionEditor(
-                        draft: draft,
-                        editable: model.editable && !model.working,
-                        commit: { await model.perform(.editDescription($0)) }
+            // The panel and the gutter are siblings of the scroll, not layers over it: whatever
+            // they take, they take out of the Draft's width, and nothing about the Draft is
+            // covered. The footer spans beneath them, so Submit stays reachable either way.
+            HStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        identity
+                        title
+                        FieldWarnings(warnings: model.titleWarnings)
+                        Divider()
+                        if model.offerRegenerateDefinitionOfDone {
+                            DefinitionOfDoneOffer(
+                                regenerate: { await model.regenerateDefinitionOfDone() },
+                                keep: { await model.perform(.keepDefinitionOfDone) },
+                                working: model.working
+                            )
+                        }
+                        DescriptionEditor(
+                            draft: draft,
+                            editable: model.editable && !model.working,
+                            commit: { await model.perform(.editDescription($0)) },
+                            finish: { await model.perform(.finishEditingDescription) }
+                        )
+                        FieldWarnings(warnings: model.descriptionWarnings)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+                }
+                if signalsOpen {
+                    SignalPanel(
+                        signals: model.draftSignals,
+                        working: model.working,
+                        retryUploads: { await model.retryUploads() },
+                        skipUploads: { await model.perform(.skipFailedUploads) },
+                        open: $signalsOpen
                     )
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 14)
+                if !model.draftSignals.isEmpty {
+                    SignalGutter(signals: model.draftSignals, open: $signalsOpen)
+                }
+            }
+            .onChange(of: model.draftSignals) { _, signals in
+                if signals.isEmpty { signalsOpen = false }
             }
             Divider()
             footer
@@ -232,40 +267,17 @@ struct DraftColumn: View {
         }
     }
 
-    /// Media upload is its own step, after the Ticket exists. It can be retried or skipped and
-    /// the Ticket is live either way, which is why it reads below the key rather than above it.
+    /// Media upload is its own step, after the Ticket exists. What went wrong with it — a file
+    /// Jira would not take, a file that did not upload — is a **Draft signal** and rests in the
+    /// gutter with the other two, so it is never on screen in two places at once. What is left
+    /// here is the one thing the gutter has no mark for: the queue is empty and the media is on
+    /// the Ticket.
     @ViewBuilder
     private func uploadStep(key: TicketKey) -> some View {
-        if !model.mediaBlockedFromUpload.isEmpty {
-            Label(
-                "\(model.mediaBlockedFromUpload.joined(separator: ", ")) was skipped — "
-                    + "Jira would not take it.",
-                systemImage: "exclamationmark.triangle"
-            )
-            .font(.system(size: 10.5))
-            .foregroundStyle(.orange)
-        }
-        if model.media.isEmpty {
-            EmptyView()
-        } else if model.failedUploads.isEmpty {
+        if !model.media.isEmpty && model.failedUploads.isEmpty {
             Label("Media uploaded to \(key.value).", systemImage: "checkmark.circle")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
-        } else {
-            HStack(spacing: 8) {
-                Label(
-                    "\(model.failedUploads.joined(separator: ", ")) did not upload.",
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.system(size: 10.5))
-                .foregroundStyle(.orange)
-                Spacer(minLength: 0)
-                Button("Retry") { Task { await model.retryUploads() } }
-                Button("Skip") { Task { await model.perform(.skipFailedUploads) } }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(model.working)
         }
     }
 }

@@ -79,10 +79,9 @@ actor FakeSecrets: Secrets {
 
 actor ScriptedModel: Model {
     var reply: GenerateReply
-    let definitionOfDone: [String]
+    var definitionOfDone: [String]
     var failGenerate = false
     private(set) var completeRequests: [ModelCompleteRequest] = []
-    private var awaitingDefinitionOfDone = false
     private var rawReply: String?
     private var holdComplete = false
     private var completeWaiters: [CheckedContinuation<Void, Never>] = []
@@ -99,6 +98,10 @@ actor ScriptedModel: Model {
 
     func replaceRawReply(_ json: String) {
         rawReply = json
+    }
+
+    func replaceDefinitionOfDone(_ bullets: [String]) {
+        definitionOfDone = bullets
     }
 
     func setFailGenerate(_ value: Bool) {
@@ -121,11 +124,12 @@ actor ScriptedModel: Model {
         completeRequests.append(
             ModelCompleteRequest(system: system, user: user, screenshots: screenshots)
         )
-        if awaitingDefinitionOfDone {
-            awaitingDefinitionOfDone = false
+        // Which pass this is comes off the instruction rather than a count of calls: the
+        // Definition of Done pass also runs on its own when the PM asks for it after a
+        // hand-edit, so "every second call" is not what tells them apart.
+        if system.contains("JSON array of Definition of Done bullets") {
             return try jsonString(definitionOfDone)
         }
-        awaitingDefinitionOfDone = true
         if let rawReply { return rawReply }
         return try jsonString(reply)
     }

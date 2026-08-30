@@ -461,3 +461,53 @@ public struct TranscriptLine: Equatable, Sendable, Codable {
         self.text = text
     }
 }
+
+/// One structural-check warning, and the field it is about.
+///
+/// §9 warns and never blocks, but "warns" is a placement problem: one undifferentiated list is
+/// wrong at any size, because it either truncates or covers the Draft it is warning about. The
+/// structural check is a **field signal**, so every warning it makes names the field it belongs
+/// beside and the window anchors it there instead of collecting it into a detached list.
+public struct StructuralWarning: Equatable, Sendable, Identifiable {
+    /// The Draft fields the check can be about. There is no third: a Bug missing its steps is a
+    /// warning about the description, and so is the field cap.
+    public enum Field: String, Equatable, Sendable {
+        case title
+        case description
+    }
+
+    public var field: Field
+    public var text: String
+
+    public var id: String { "\(field.rawValue):\(text)" }
+
+    public init(field: Field, text: String) {
+        self.field = field
+        self.text = text
+    }
+}
+
+/// One signal about the Draft as a whole, resting as a mark in the gutter down the Draft's edge.
+///
+/// The counterpart to `StructuralWarning`: these are not about a field, so there is no field to
+/// anchor them at. §9 names three — a failed Catalog refresh, oversize or disabled Material,
+/// failed uploads. Deliberately absent: the open-questions section, which **is** its own warning
+/// and already sits in the description, and the duplicate, which is a conversation event (§10).
+/// None of them block Submit.
+public struct DraftSignal: Equatable, Sendable, Identifiable {
+    public enum Kind: String, Equatable, Sendable {
+        case catalog
+        case material
+        case upload
+    }
+
+    public var kind: Kind
+    public var text: String
+
+    public var id: String { "\(kind.rawValue):\(text)" }
+
+    public init(kind: Kind, text: String) {
+        self.kind = kind
+        self.text = text
+    }
+}

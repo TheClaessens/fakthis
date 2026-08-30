@@ -229,7 +229,10 @@ final class Store {
         proposedProject = next.proposedProject
         materialWarnings = next.materialWarnings
         failedUploads = next.failedUploads
-        structuralWarnings = next.structuralWarnings
+        // The throwaway store predates the field anchor on a structural warning — the finding it
+        // produced is exactly why `Session` carries one now. Flattened rather than rebuilt: this
+        // target goes with #40.
+        structuralWarnings = next.structuralWarnings.map(\.text)
         if let draft = next.draft {
             self.draft = draft
             mirror(draft)

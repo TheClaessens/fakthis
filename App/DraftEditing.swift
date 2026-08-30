@@ -65,6 +65,10 @@ struct DescriptionEditor: View {
     var draft: Draft
     var editable: Bool
     var commit: (String) async -> Void
+    /// That typing has stopped. `Session` waits for it before offering to regenerate the
+    /// Definition of Done: a bar raised on the first character would push the text down under
+    /// the cursor while it was still being written.
+    var finish: () async -> Void
 
     @State private var editing = false
     @FocusState private var focused: Bool
@@ -84,9 +88,9 @@ struct DescriptionEditor: View {
             }
             .onAppear { focused = true }
             .onChange(of: focused) { _, hasFocus in
-                if !hasFocus { editing = false }
+                if !hasFocus { stopEditing() }
             }
-            .onExitCommand { editing = false }
+            .onExitCommand { stopEditing() }
         } else {
             MarkdownBlocks(markdown: draft.descriptionWithOpenQuestions)
                 .font(.system(size: 12.5))
@@ -94,6 +98,15 @@ struct DescriptionEditor: View {
                 .contentShape(Rectangle())
                 .onTapGesture { editing = editable }
         }
+    }
+
+    /// The last keystroke may still be in flight when focus goes, so this can reach `Session`
+    /// before it. That is harmless: `Session` holds the hand-edit as a fact rather than a
+    /// moment, so a keystroke landing after the finish is simply the edit the next finish is
+    /// about — and answering the offer clears both halves.
+    private func stopEditing() {
+        editing = false
+        Task { await finish() }
     }
 
     /// The questions stay on screen while the description is being typed, because they are still

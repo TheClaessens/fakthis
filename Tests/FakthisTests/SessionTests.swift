@@ -2445,10 +2445,26 @@ import Fakthis
     )
     _ = try await harness.session.perform(.typeBrainDump(BugReply.brainDump))
     let generated = try await harness.session.perform(.generate)
-    #expect(generated.structuralWarnings.contains("title does not match the Bug convention"))
-    #expect(generated.structuralWarnings.contains("Bug is missing steps to reproduce"))
-    #expect(generated.structuralWarnings.contains("Bug is missing Expected against Actual"))
-    #expect(generated.structuralWarnings.contains("Bug is missing Environment"))
+    #expect(
+        generated.structuralWarnings.contains(
+            StructuralWarning(field: .title, text: "title does not match the Bug convention")
+        )
+    )
+    #expect(
+        generated.structuralWarnings.contains(
+            StructuralWarning(field: .description, text: "Bug is missing steps to reproduce")
+        )
+    )
+    #expect(
+        generated.structuralWarnings.contains(
+            StructuralWarning(field: .description, text: "Bug is missing Expected against Actual")
+        )
+    )
+    #expect(
+        generated.structuralWarnings.contains(
+            StructuralWarning(field: .description, text: "Bug is missing Environment")
+        )
+    )
 
     let submitted = try await harness.session.perform(.submit)
     #expect(submitted.draft?.key == TicketKey("FAK-1"))
@@ -2474,7 +2490,11 @@ import Fakthis
     )
     _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
     let generated = try await harness.session.perform(.generate)
-    #expect(generated.structuralWarnings.contains("description leaves the Markdown vocabulary"))
+    #expect(
+        generated.structuralWarnings.contains(
+            StructuralWarning(field: .description, text: "description leaves the Markdown vocabulary")
+        )
+    )
 }
 
 @Test func aWellFormedBugHasNoStructuralWarnings() async throws {
@@ -2506,7 +2526,11 @@ import Fakthis
     )
     _ = try await harness.session.perform(.typeBrainDump(ChoreReply.brainDump))
     let generated = try await harness.session.perform(.generate)
-    #expect(generated.structuralWarnings.contains("title does not match the Chore convention"))
+    #expect(
+        generated.structuralWarnings.contains(
+            StructuralWarning(field: .title, text: "title does not match the Chore convention")
+        )
+    )
 }
 
 @Test func aWellFormedChoreHasNoStructuralWarnings() async throws {
@@ -2523,6 +2547,170 @@ import Fakthis
     _ = try await harness.session.perform(.typeBrainDump(ChoreReply.brainDump))
     let generated = try await harness.session.perform(.generate)
     #expect(generated.structuralWarnings.isEmpty)
+}
+
+@Test func aHandEditOfTheDescriptionOffersToRegenerateTheDefinitionOfDoneAndReArms() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    // The agent has just written both passes, so there is nothing outstanding to offer about.
+    #expect(!generated.offerRegenerateDefinitionOfDone)
+    let description = try #require(generated.draft?.description)
+
+    // Typing raises nothing. A bar that appeared on the first character would push the text
+    // down under the cursor while it was still being written.
+    let typing = try await harness.session.perform(
+        .editDescription(description + "\n\nThe scan is per bin, not per tote.")
+    )
+    #expect(!typing.offerRegenerateDefinitionOfDone)
+
+    let edited = try await harness.session.perform(.finishEditingDescription)
+    #expect(edited.offerRegenerateDefinitionOfDone)
+
+    let kept = try await harness.session.perform(.keepDefinitionOfDone)
+    #expect(!kept.offerRegenerateDefinitionOfDone)
+    #expect(kept.draft?.description == edited.draft?.description)
+
+    // Focus coming and going without a keystroke is not a hand-edit.
+    let idle = try await harness.session.perform(.finishEditingDescription)
+    #expect(!idle.offerRegenerateDefinitionOfDone)
+
+    // Re-arms: Keep answers the edit that armed it, not every edit after it.
+    _ = try await harness.session.perform(
+        .editDescription(description + "\n\nThe scan is per bin.")
+    )
+    let editedAgain = try await harness.session.perform(.finishEditingDescription)
+    #expect(editedAgain.offerRegenerateDefinitionOfDone)
+}
+
+@Test func regeneratingTheDefinitionOfDoneReadsOnlyTheDescriptionAboveTheRule() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let description = try #require(generated.draft?.description)
+    #expect(description.contains(StoryReply.definitionOfDone))
+
+    let body = StoryReply.firstPassDescription + "\n\nThe scan is per bin, not per tote."
+    _ = try await harness.session.perform(
+        .editDescription(
+            """
+            \(body)
+
+            ---
+
+            **Definition of Done:**
+
+            - \(StoryReply.definitionOfDone)
+            """
+        )
+    )
+    _ = try await harness.session.perform(.finishEditingDescription)
+    await harness.model.replaceDefinitionOfDone(["Each bin is scanned separately"])
+    let regenerated = try await harness.session.perform(.regenerateDefinitionOfDone)
+
+    let secondPass = try #require(await harness.model.completeRequests.last)
+    #expect(secondPass.user == body)
+    #expect(!secondPass.user.contains("Definition of Done"))
+    #expect(!secondPass.user.contains(StoryReply.definitionOfDone))
+
+    let after = try #require(regenerated.draft?.description)
+    #expect(after.contains("- Each bin is scanned separately"))
+    #expect(!after.contains(StoryReply.definitionOfDone))
+    #expect(after.contains("The scan is per bin, not per tote."))
+    #expect(!regenerated.offerRegenerateDefinitionOfDone)
+}
+
+@Test func aFailedRegenerateOfTheDefinitionOfDoneKeepsTheDraftAndLeavesTheOfferStanding()
+    async throws
+{
+    let harness = Harness()
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let description = try #require(generated.draft?.description)
+    _ = try await harness.session.perform(
+        .editDescription(description + "\n\nThe scan is per bin, not per tote.")
+    )
+    let edited = try await harness.session.perform(.finishEditingDescription)
+
+    await harness.model.setFailGenerate(true)
+    let failed = try await harness.session.perform(.regenerateDefinitionOfDone)
+    #expect(failed.draft?.description == edited.draft?.description)
+    #expect(failed.offerRegenerateDefinitionOfDone)
+    #expect(failed.status == .yourTurn)
+}
+
+@Test func draftSignalsCarryTheCatalogMaterialAndUploadFactsAndNeverTheOpenQuestions()
+    async throws
+{
+    let harness = Harness()
+    await harness.jira.setAttachmentPolicy(AttachmentPolicy(enabled: true, uploadLimit: 10))
+    let attached = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "pick.png",
+                mimeType: "image/png",
+                data: Data("this-screenshot-is-oversize".utf8)
+            )
+        )
+    )
+    #expect(
+        attached.draftSignals == [DraftSignal(kind: .material, text: "pick.png is oversize")]
+    )
+
+    await harness.model.replaceReply(StoryReply.asking("Which bin does a picker scan first?"))
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+
+    // The open-questions section **is** its own warning and sits in the description. Repeating
+    // it in the gutter would inflate the count by one and say nothing new.
+    #expect(generated.draft?.openQuestions.isEmpty == false)
+    #expect(!generated.draftSignals.contains { $0.text.contains("question") })
+    #expect(generated.draftSignals.map(\.kind) == [.material])
+}
+
+@Test func aMaterialWarningThatNamesNoFileStaysInTheGutterAfterSubmit() async throws {
+    let harness = Harness()
+    await harness.jira.setAttachmentPolicy(AttachmentPolicy(enabled: false, uploadLimit: 0))
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: Data("png".utf8))
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    let submitted = try await harness.session.perform(.submit)
+
+    // The site refusing attachments is true whether or not the Ticket exists yet, so it is not
+    // replaced by the after-the-fact "was skipped" line the way a warning about one file is.
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(
+        submitted.draftSignals.map(\.text) == [
+            "attachments are disabled",
+            "pick.png was skipped — Jira would not take it.",
+        ]
+    )
+}
+
+@Test func aFailedUploadIsADraftSignalAndNothingInTheGutterBlocksSubmit() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: Data("png".utf8))
+        )
+    )
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    await harness.jira.setFailUploads(true)
+
+    let submitted = try await harness.session.perform(.submit)
+    // Submit went through with a signal already resting: the Ticket exists.
+    #expect(submitted.draft?.key == TicketKey("FAK-1"))
+    #expect(submitted.draftSignals.map(\.kind) == [.upload])
+    #expect(submitted.draftSignals.first?.text.contains("pick.png did not upload") == true)
+
+    await harness.jira.setFailUploads(false)
+    let retried = try await harness.session.perform(.retryUploads)
+    #expect(retried.draftSignals.isEmpty)
 }
 
 @Test func submitDoesNotQueryAttachmentPolicyWhenTheDraftHasNoMedia() async throws {

@@ -40,6 +40,35 @@ enum FixtureProject {
     /// synthetic click. Goes with the rest of this file when #35 lands real setup.
     static var generateOnOpen: Bool { CommandLine.arguments.contains("--generate") }
 
+    /// The same scaffolding for the gutter: launch with `--signals` and the fixture attaches one
+    /// screenshot Jira is too small to take and one video it will refuse at upload. That is one
+    /// resting mark before Submit and two after it — the single-signal case and the several-
+    /// signal case, which are judged differently. Layout is judged by looking at it, and there
+    /// is no other way to get a signal onto a Draft without a synthetic drag.
+    static var signalsOnOpen: Bool { CommandLine.arguments.contains("--signals") }
+
+    /// And for the Definition of Done offer, which only a hand-edit arms: launch with `--edited`
+    /// and the fixture appends a sentence to the description the way the keyboard would.
+    static var editDescriptionOnOpen: Bool { CommandLine.arguments.contains("--edited") }
+
+    static let editedSentence = "\n\nThe payment step reads the same figure."
+
+    /// What it attaches. Sized against the policy below: the screenshot is over the limit and is
+    /// refused at attach, the video is under it and is refused by the fixture Jira at upload,
+    /// which is where the `fail-` prefix is read.
+    static let signalMaterial = [
+        Material(
+            filename: "pick.png",
+            mimeType: "image/png",
+            data: Data("this-screenshot-is-oversize".utf8)
+        ),
+        Material(
+            filename: "fail-repro.mp4",
+            mimeType: "video/mp4",
+            data: Data("fake-mp4".utf8)
+        ),
+    ]
+
     /// What it types. Sixty spoken words about a Ticket the canned replies answer.
     static let brainDump =
         "the checkout total is wrong on mobile, it shows the total from before you changed "
@@ -97,15 +126,16 @@ private actor FixtureSecrets: Secrets {
 /// It reads the type out of the reshape instruction `Session` writes, which is the only way a
 /// canned model can show that changing the type reshapes the Draft against the new template.
 private actor FixtureModel: Model {
-    private var awaitingDefinitionOfDone: TicketType?
+    /// Which pass this is comes off the instruction, not off a count of calls: the Definition of
+    /// Done pass also runs on its own when the PM answers the offer a hand-edit armed.
+    private var lastTicketType = TicketType.story
 
     func complete(system: String, user: String, screenshots: [Material]) async throws -> String {
-        if let ticketType = awaitingDefinitionOfDone {
-            awaitingDefinitionOfDone = nil
-            return json(FixtureContent.definitionOfDone(ticketType))
+        if system.contains("JSON array of Definition of Done bullets") {
+            return json(FixtureContent.definitionOfDone(lastTicketType))
         }
         let ticketType = TicketType.allCases.first { system.contains("as a \($0.rawValue)") } ?? .story
-        awaitingDefinitionOfDone = ticketType
+        lastTicketType = ticketType
         return json(FixtureContent.reply(ticketType))
     }
 
@@ -129,7 +159,10 @@ private actor FixtureJira: Jira {
     }
 
     func attachmentPolicy() async throws -> AttachmentPolicy {
-        AttachmentPolicy(enabled: true, uploadLimit: 10_485_760)
+        AttachmentPolicy(
+            enabled: true,
+            uploadLimit: FixtureProject.signalsOnOpen ? 12 : 10_485_760
+        )
     }
 
     private var nextNumber = 301

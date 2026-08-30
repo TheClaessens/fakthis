@@ -12,6 +12,15 @@ public actor Session {
         case editTitle(String)
         case editShortLabel(String)
         case editDescription(String)
+        /// The PM has stopped typing in the description. It is what arms the Definition of Done
+        /// offer, rather than the keystrokes: a bar that appears on the first character would
+        /// push the text down under the cursor while it is still being written.
+        case finishEditingDescription
+        /// The two answers to the offer a hand-edited description arms. Keep leaves the
+        /// Definition of Done alone; Regenerate runs the second pass again over the edited
+        /// description. Both disarm the offer, and the next hand-edit arms it afresh.
+        case keepDefinitionOfDone
+        case regenerateDefinitionOfDone
         case submit
         case newDraft
         case retryUploads
@@ -62,7 +71,17 @@ public actor Session {
         public var proposedProject: ProposedProject?
         public var materialWarnings: [String]
         public var failedUploads: [String]
-        public var structuralWarnings: [String]
+        /// Field signals: each one names the Draft field it is about, so the window can put it
+        /// beside that field instead of in a list (§9).
+        public var structuralWarnings: [StructuralWarning]
+        /// Draft signals: the ones that are about the Draft as a whole and rest in the gutter.
+        /// Assembled here rather than in the window, because *which* facts are Draft signals is
+        /// §9's rule and the window does not get to hold a second opinion about it.
+        public var draftSignals: [DraftSignal]
+        /// Armed by a hand-edit of the description, because the Definition of Done was written
+        /// by a pass that read the description as it then was. §7.3: offer, never regenerate
+        /// silently — and re-arm, so Keep followed by another edit offers it again.
+        public var offerRegenerateDefinitionOfDone: Bool
         public var duplicateInterrupt: DuplicateHit?
         public var related: [RelatedHit]
         public var status: Status
@@ -102,6 +121,8 @@ public actor Session {
     private var rewriteError: String?
     private var fetched: RewriteTarget?
     private var batch: Batch?
+    private var offerRegenerateDefinitionOfDone = false
+    private var descriptionHandEdited = false
     private var brainDump = ""
     private var namingTurn = ""
     private var fieldByDraft: [String: String] = [:]
@@ -154,7 +175,14 @@ public actor Session {
             try edit { $0.shortLabel = shortLabel }
         case .editDescription(let description):
             startBackgroundRefreshIfStale()
-            try edit { $0.description = description }
+            try editDescription(description)
+        case .finishEditingDescription:
+            finishEditingDescription()
+        case .keepDefinitionOfDone:
+            clearDefinitionOfDoneOffer()
+        case .regenerateDefinitionOfDone:
+            startBackgroundRefreshIfStale()
+            try await regenerateDefinitionOfDone()
         case .submit:
             startBackgroundRefreshIfStale()
             try await submit()
@@ -836,6 +864,71 @@ public actor Session {
         try persistDraft()
     }
 
+    /// A hand-edit of the description. It records that one happened rather than raising the
+    /// offer, which waits for the PM to stop typing: the edit is only counted when it actually
+    /// applied, so a keystroke `edit` refused after Submit is not a hand-edit of anything.
+    private func editDescription(_ description: String) throws {
+        guard draft != nil, !isUploadQueue else { return }
+        try edit { $0.description = description }
+        descriptionHandEdited = true
+    }
+
+    /// Typing has stopped, so the offer can appear without moving the text out from under the
+    /// cursor. A hand-edit is spent by being offered about: the next one arms it again, which is
+    /// the re-arm §7.3 asks for.
+    private func finishEditingDescription() {
+        guard descriptionHandEdited else { return }
+        descriptionHandEdited = false
+        offerRegenerateDefinitionOfDone = true
+    }
+
+    /// Both halves together: the offer that is up, and the edit that would raise it next time.
+    /// A Generate, a Keep, a Regenerate, a new Draft and a change of focus all answer the
+    /// hand-edit, so none of them may leave one of the two behind to fire afterwards.
+    private func clearDefinitionOfDoneOffer() {
+        offerRegenerateDefinitionOfDone = false
+        descriptionHandEdited = false
+    }
+
+    /// The second pass again, over the description the PM has edited. It reads **only** the
+    /// description above its own Definition of Done, so a regenerate cannot fold the previous
+    /// bullets back in and cannot add Scope the prose does not have.
+    ///
+    /// A failed model leaves the Draft and the offer exactly as they were: the PM presses again.
+    private func regenerateDefinitionOfDone() async throws {
+        guard let project, let draft, !isUploadQueue else { return }
+        let body = descriptionAboveDefinitionOfDone(draft.description)
+        status = .agentThinking
+        defer { status = .yourTurn }
+        let done: [String]
+        do {
+            done = try await definitionOfDone(reading: body, project: project)
+        } catch is ModelFailed {
+            return
+        }
+        try edit { $0.description = descriptionClosedByDefinitionOfDone(body: body, bullets: done) }
+        clearDefinitionOfDoneOffer()
+    }
+
+    /// The Definition of Done pass. Its own call to the agent, reading **only** the description
+    /// it is handed, so it cannot add Scope the prose does not have — which is the whole reason
+    /// it is a second pass rather than part of the first. Both callers go through here: the one
+    /// that follows a Generate, and the one the PM presses after a hand-edit.
+    private func definitionOfDone(reading description: String, project: Project) async throws
+        -> [String]
+    {
+        try decodeJSON(
+            try await model.complete(
+                system: systemPrompt(
+                    prefix: stuffedPrefix(catalog: catalog, projectTerms: project.terms),
+                    instruction: definitionOfDoneInstruction
+                ),
+                user: description,
+                screenshots: []
+            )
+        )
+    }
+
     /// Done with the Ticket that was just Submitted: the window goes back to the front door.
     ///
     /// Only reachable once the Jira issue exists **and** the upload queue is empty, because the
@@ -857,6 +950,7 @@ public actor Session {
         fetched = nil
         rewriteError = nil
         fieldByDraft = [:]
+        clearDefinitionOfDoneOffer()
     }
 
     private func changeTicketType(_ ticketType: TicketType) async throws {
@@ -1051,6 +1145,9 @@ public actor Session {
         self.batch = batch
         try loadSibling(id)
         field = fieldByDraft[id] ?? ""
+        // The offer is about the description that was hand-edited. Another sibling's description
+        // is not that one, so the offer does not travel with the focus.
+        clearDefinitionOfDoneOffer()
     }
 
     private func addDraft(shortLabel: String) throws {
@@ -1325,29 +1422,14 @@ public actor Session {
                     screenshots: screenshots
                 )
             )
-            done = try decodeJSON(
-                try await model.complete(
-                    system: systemPrompt(
-                        prefix: prefix,
-                        instruction: definitionOfDoneInstruction
-                    ),
-                    user: generated.description,
-                    screenshots: []
-                )
-            )
+            done = try await definitionOfDone(reading: generated.description, project: project)
         } catch is ModelFailed {
             return
         }
-        let bullets = done.map { "- \($0)" }.joined(separator: "\n")
-        let description = """
-            \(generated.description)
-
-            ---
-
-            **Definition of Done:**
-
-            \(bullets)
-            """
+        let description = descriptionClosedByDefinitionOfDone(
+            body: generated.description,
+            bullets: done
+        )
         let id = draft?.id ?? draftId ?? UUID().uuidString
         draftId = id
         draft = Draft(
@@ -1366,6 +1448,9 @@ public actor Session {
         // copy of it in the composer would offer to say it a second time — and a second Send
         // would record it as a second turn.
         if spendsField { field = "" }
+        // The agent has just written both the description and its Definition of Done, so there
+        // is no hand-edit left outstanding for the offer to be about.
+        clearDefinitionOfDoneOffer()
         refreshBatchSiblings()
         try refreshMatches()
     }
@@ -2036,9 +2121,53 @@ public actor Session {
         var writtenBlocksLinks: [String]
     }
 
-    private func structuralWarningsForSnapshot() -> [String] {
+    private func structuralWarningsForSnapshot() -> [StructuralWarning] {
         guard let draft, !draft.title.isEmpty || !draft.description.isEmpty else { return [] }
         return structuralWarnings(for: draft)
+    }
+
+    /// §9's Draft signals, in the order they rest in the gutter: the Catalog first, because it
+    /// is about the Context the Draft was written against; then Material; then the uploads,
+    /// which only exist once the Ticket does.
+    private func draftSignalsForSnapshot() -> [DraftSignal] {
+        var signals: [DraftSignal] = []
+        if catalogRefreshFailed {
+            signals.append(
+                DraftSignal(
+                    kind: .catalog,
+                    text: "The Catalog could not refresh. Generate is using the last pull."
+                )
+            )
+        }
+        // Before the Ticket exists the warning about a file is why it will not go: oversize,
+        // unsupported. Once it exists that has already happened, so the signal says so instead —
+        // one fact about the same file, never both at once. A warning that names no file, like
+        // attachments being disabled on the site, is true either way and stays.
+        let skipped = material
+            .filter { $0.isMedia && blockedUploads.contains($0.filename) }
+            .map(\.filename)
+        let named = isUploadQueue ? skipped : []
+        signals += materialWarnings
+            .filter { warning in !named.contains { warning.hasPrefix($0) } }
+            .map { DraftSignal(kind: .material, text: $0) }
+        if !named.isEmpty {
+            signals.append(
+                DraftSignal(
+                    kind: .material,
+                    text: "\(named.joined(separator: ", ")) was skipped — Jira would not take it."
+                )
+            )
+        }
+        if !failedUploads.isEmpty {
+            signals.append(
+                DraftSignal(
+                    kind: .upload,
+                    text: "\(failedUploads.joined(separator: ", ")) did not upload. "
+                        + "The Ticket is live either way."
+                )
+            )
+        }
+        return signals
     }
 
     private func snapshot() -> State {
@@ -2056,6 +2185,8 @@ public actor Session {
             materialWarnings: materialWarnings,
             failedUploads: failedUploads,
             structuralWarnings: structuralWarningsForSnapshot(),
+            draftSignals: draftSignalsForSnapshot(),
+            offerRegenerateDefinitionOfDone: offerRegenerateDefinitionOfDone && draft != nil,
             duplicateInterrupt: duplicateInterrupt,
             related: related,
             status: status,
@@ -2072,8 +2203,13 @@ public actor Session {
     }
 }
 
-private func structuralWarnings(for draft: Draft) -> [String] {
-    titleConventionWarnings(draft) + typeShapeWarnings(draft) + descriptionWarnings(draft.description)
+/// Every warning the check makes belongs to a field: the title convention to the title, and the
+/// template's shape, the Definition of Done, the headings, the vocabulary and the field cap to
+/// the description. Nothing the check produces is about the Draft as a whole.
+private func structuralWarnings(for draft: Draft) -> [StructuralWarning] {
+    titleConventionWarnings(draft).map { StructuralWarning(field: .title, text: $0) }
+        + (typeShapeWarnings(draft) + descriptionWarnings(draft.description))
+            .map { StructuralWarning(field: .description, text: $0) }
 }
 
 private func titleConventionWarnings(_ draft: Draft) -> [String] {
@@ -2143,6 +2279,31 @@ private func descriptionWarnings(_ description: String) -> [String] {
         warnings.append("description exceeds the field cap")
     }
     return warnings
+}
+
+/// The description with its Definition of Done closing it. The one place that shape is written,
+/// so the second pass and a later regenerate of it cannot disagree about where the rule goes.
+private func descriptionClosedByDefinitionOfDone(body: String, bullets: [String]) -> String {
+    let bullets = bullets.map { "- \($0)" }.joined(separator: "\n")
+    return """
+        \(body)
+
+        ---
+
+        **Definition of Done:**
+
+        \(bullets)
+        """
+}
+
+/// The inverse: everything above the horizontal rule. A regenerate reads only this, so the
+/// bullets it is replacing are never part of what it reads.
+private func descriptionAboveDefinitionOfDone(_ description: String) -> String {
+    var lines = description.split(separator: "\n", omittingEmptySubsequences: false)
+    guard let rule = lines.lastIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" })
+    else { return description }
+    lines.removeSubrange(rule...)
+    return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 private func leavesMarkdownVocabulary(_ description: String) -> Bool {

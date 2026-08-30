@@ -79,6 +79,12 @@ final class WindowModel {
         await whileWorking { await perform(.retryUploads) }
     }
 
+    /// The second pass again, over the description the PM edited. A round trip to the agent, so
+    /// it waits the way Generate does — and it is a press, never silent (§7.3).
+    func regenerateDefinitionOfDone() async {
+        await whileWorking { await perform(.regenerateDefinitionOfDone) }
+    }
+
     private func whileWorking(_ body: () async -> Void) async {
         working = true
         defer { working = false }
@@ -105,8 +111,15 @@ final class WindowModel {
     /// Draft but never uploaded (§7), so counting it here would make the upload step say a file
     /// reached the Ticket that never did.
     var media: [AttachedMaterial] { material.filter { $0.isMedia && !$0.blockedFromUpload } }
-    var mediaBlockedFromUpload: [String] {
-        material.filter { $0.isMedia && $0.blockedFromUpload }.map(\.filename)
+    /// The structural check, split by the field each warning is about. `Session` does the
+    /// splitting — which field a warning belongs to is §9's rule, not a guess the window makes
+    /// from the warning's wording.
+    var titleWarnings: [StructuralWarning] { structuralWarnings(.title) }
+    var descriptionWarnings: [StructuralWarning] { structuralWarnings(.description) }
+    /// What rests in the gutter. Assembled behind the actor too, for the same reason.
+    var draftSignals: [DraftSignal] { state?.draftSignals ?? [] }
+    var offerRegenerateDefinitionOfDone: Bool {
+        state?.offerRegenerateDefinitionOfDone ?? false
     }
     /// A Batch is Submitted and finished as one, so a single Draft inside it cannot be the thing
     /// that starts the next one. `Session` refuses `.newDraft` there; the window does not offer
@@ -121,4 +134,8 @@ final class WindowModel {
     var material: [AttachedMaterial] { state?.material ?? [] }
     var projectKey: String { state?.project?.key ?? "" }
     var hasProject: Bool { state?.project != nil }
+
+    private func structuralWarnings(_ field: StructuralWarning.Field) -> [StructuralWarning] {
+        (state?.structuralWarnings ?? []).filter { $0.field == field }
+    }
 }

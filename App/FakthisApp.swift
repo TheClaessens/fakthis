@@ -40,9 +40,20 @@ struct FakthisWindow: View {
             }
             let model = WindowModel(session: session)
             await model.open()
+            if FixtureProject.signalsOnOpen, model.material.isEmpty {
+                for item in FixtureProject.signalMaterial {
+                    await model.perform(.attachMaterial(item))
+                }
+            }
             if FixtureProject.generateOnOpen, model.draft == nil {
                 await model.type(FixtureProject.brainDump)
                 await model.generate()
+            }
+            if FixtureProject.editDescriptionOnOpen, let draft = model.draft {
+                await model.perform(
+                    .editDescription(draft.description + FixtureProject.editedSentence)
+                )
+                await model.perform(.finishEditingDescription)
             }
             if FixtureProject.submitOnOpen { await model.submit() }
             self.model = model
