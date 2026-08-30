@@ -309,6 +309,32 @@ final class WindowModel {
     /// what is being confirmed, and everywhere else it arrives on its own and has to be read.
     /// Never in the Draft UI.
     var textMaterialDisclosure: String? { state?.textMaterialDisclosure }
+    /// Present while this Draft is one of a Batch. The sibling list *is* the rail; the window
+    /// reads the grouping, it does not keep one of its own.
+    var batch: Batch? { state?.batch }
+    /// Existing epics on the Catalog. A Batch default and a per-Draft override pick from this
+    /// list; Fakthis does not author epics, so an empty list is a legal answer, not a prompt
+    /// to create one.
+    var epics: [CatalogEpic] { state?.catalog.epics ?? [] }
+    /// One listing for the whole Batch, never a per-Draft interrupt. Empty means no UI.
+    var batchDuplicates: [BatchDuplicate] { state?.batch?.duplicates ?? [] }
+    /// Mid-chat conversion: regenerate Draft 1's description, default on. Only armed on Draft 1
+    /// — a sibling's description is not the one-ticket prose the offer is about.
+    var offerRegenerateDraft1: Bool {
+        guard let batch else { return false }
+        return batch.offerRegenerateDraft1 && batch.focusedDraftId == batch.siblings.first?.id
+    }
+    /// An empty sibling has no Draft to chat about yet. Generate writes that one; Send would
+    /// spend the field as a chat answer against a blank.
+    var needsGenerate: Bool {
+        guard let draft, editable, rewrite == nil else { return false }
+        return draft.title.isEmpty
+    }
+
+    func epicName(_ key: TicketKey?) -> String? {
+        guard let key else { return nil }
+        return epics.first { $0.key == key }?.name ?? key.value
+    }
 
     private func structuralWarnings(_ field: StructuralWarning.Field) -> [StructuralWarning] {
         (state?.structuralWarnings ?? []).filter { $0.field == field }

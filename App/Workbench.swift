@@ -10,9 +10,12 @@ struct Workbench: View {
 
     /// Whether the conversation is a spine. The surface owns it rather than the column, because
     /// Rewrite opens with it already collapsed — Update does not require Generate — and a
-    /// keyboard-only rewrite should not stare at an empty third of the window. Create opens
-    /// with it open.
+    /// keyboard-only rewrite should not stare at an empty third of the window. Create and Batch
+    /// open it for chat.
     @State private var conversationCollapsed: Bool
+    /// The control that names a Batch after a Draft exists. Before Generate that control is a
+    /// toolbar button on the front door; here it hangs off Material, because there is a rail.
+    @State private var namingBatch = false
 
     init(model: WindowModel, draft: Draft) {
         self.model = model
@@ -35,6 +38,9 @@ struct Workbench: View {
             // would hide it, and Continue cannot be pressed from a mark that does not exist yet.
             if hit != nil { conversationCollapsed = false }
         }
+        .onChange(of: model.batchDuplicates.isEmpty) { _, empty in
+            if !empty { conversationCollapsed = false }
+        }
         .onChange(of: model.rewrite != nil) { _, rewriting in
             // Duplicate → work-on-that lands in Rewrite on this same Workbench. Init does not
             // run again, so the collapse has to happen here. Update clearing `rewrite` must
@@ -45,13 +51,16 @@ struct Workbench: View {
 
     // MARK: - Rail
 
-    /// Create: Material, and Related when there are hits. Rewrite: the live description and
-    /// comments, beside the Draft. Related stays under either — it is Context for the next
-    /// turn, not a second rail.
+    /// Create: Material, and Related when there are hits. Batch: the sibling list. Rewrite: the
+    /// live description and comments, beside the Draft. Related stays under any of them — it is
+    /// Context for the next turn, not a second rail.
     private var rail: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let rewrite = model.rewrite {
                 RewriteRail(rewrite: rewrite)
+                related
+            } else if let batch = model.batch {
+                BatchRail(model: model, batch: batch)
                 related
             } else {
                 material
@@ -65,7 +74,23 @@ struct Workbench: View {
 
     private var material: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ColumnTitle("Material")
+            if namingBatch {
+                NameBatchForm(
+                    model: model,
+                    fromExistingDraft: true,
+                    cancel: { namingBatch = false }
+                )
+            } else {
+            ColumnTitle("Material") {
+                if model.editable && model.rewrite == nil {
+                    Button("Batch", systemImage: "list.bullet.rectangle") {
+                        namingBatch = true
+                    }
+                    .buttonStyle(.accessoryBar)
+                    .disabled(model.working)
+                    .accessibilityLabel("Name a Batch")
+                }
+            }
             if model.material.isEmpty {
                 Text("Nothing attached.")
                     .font(.system(size: 11))
@@ -89,6 +114,7 @@ struct Workbench: View {
                     }
                 }
                 .padding(.vertical, 4)
+            }
             }
         }
     }
@@ -172,6 +198,13 @@ struct DraftColumn: View {
                         title
                         FieldWarnings(warnings: model.titleWarnings)
                         Divider()
+                        if model.offerRegenerateDraft1 {
+                            Draft1RegenerateOffer(
+                                regenerate: { await model.generate() },
+                                keep: { await model.perform(.dismissRegenerateOffer) },
+                                working: model.working
+                            )
+                        }
                         if model.offerRegenerateDefinitionOfDone {
                             DefinitionOfDoneOffer(
                                 regenerate: { await model.regenerateDefinitionOfDone() },
@@ -290,11 +323,13 @@ struct DraftColumn: View {
     /// them. After the write the same strip names the Ticket and carries the upload step.
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let submitted = model.submitted {
+            if let submitted = model.submitted, model.batch == nil {
                 submittedRow(submitted)
                 uploadStep(key: submitted.key)
             } else if let rewrite = model.rewrite, let key = draft.key {
                 RewriteFooter(model: model, draft: draft, rewrite: rewrite, key: key)
+            } else if let batch = model.batch {
+                batchSubmitRow(batch)
             } else {
                 submitRow
             }
@@ -303,6 +338,34 @@ struct DraftColumn: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// One Submit for the Batch. It sits on the Batch, not on the focused Draft — focusing
+    /// another sibling does not produce a second button, and a sibling that already has a key
+    /// does not replace it with New Draft.
+    private func batchSubmitRow(_ batch: Batch) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Submit writes all \(batch.siblings.count) in \(model.projectKey)"
+                    + (batch.blocks.isEmpty ? "." : ", blocker first."))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                if model.submitRefused {
+                    Text("Jira did not answer. Already-created siblings stay — Submit again.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            Button {
+                Task { await model.submit() }
+            } label: {
+                Label("Submit", systemImage: "arrow.up.forward.square")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.working)
+        }
     }
 
     private var submitRow: some View {

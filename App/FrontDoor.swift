@@ -18,6 +18,9 @@ struct FrontDoor: View {
     /// The key field is a front-door surface, not a sheet: Batch and Rewrite are toolbar
     /// buttons until a Draft exists, and this is what Rewrite's button opens.
     @State private var improvingExisting = false
+    /// The third way to name a Batch: a control that does not go through the agent. Same
+    /// surface as Improve existing — it replaces the composer until the grouping exists.
+    @State private var namingBatch = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +33,12 @@ struct FrontDoor: View {
                         ImproveExisting(
                             model: model,
                             cancel: { improvingExisting = false }
+                        )
+                    } else if namingBatch {
+                        NameBatchForm(
+                            model: model,
+                            fromExistingDraft: false,
+                            cancel: { namingBatch = false }
                         )
                     } else {
                         SessionField(model: model) { brainDump in
@@ -88,8 +97,9 @@ struct FrontDoor: View {
     // MARK: - Toolbar
 
     /// With no rail before Generate, Batch and Rewrite have nowhere to live, so they are two
-    /// toolbar buttons. You choose the surface before you have anything to put on it. Batch is
-    /// still its own ticket; Rewrite's button opens the key field.
+    /// toolbar buttons. You choose the surface before you have anything to put on it. Batch
+    /// opens the naming form — a control that does not go through the agent, minimum two
+    /// Drafts. Rewrite's button opens the key field.
     ///
     /// The Project key is the third: everything that belongs to the Project rather than to this
     /// Draft — its terms, the other Projects, adding one — hangs off the name of the Project you
@@ -99,8 +109,12 @@ struct FrontDoor: View {
             project
             Spacer()
             Group {
-                Button("Batch", systemImage: "list.bullet.rectangle") {}
+                Button("Batch", systemImage: "list.bullet.rectangle") {
+                    improvingExisting = false
+                    namingBatch = true
+                }
                 Button("Improve existing", systemImage: "arrow.triangle.2.circlepath") {
+                    namingBatch = false
                     improvingExisting = true
                 }
             }
@@ -160,6 +174,10 @@ struct FrontDoor: View {
 
                 chips
 
+                if classified {
+                    NameBatchForm(model: model, fromExistingDraft: false)
+                }
+
                 HStack {
                     SpeakToggle(model: model)
                     Spacer()
@@ -198,6 +216,12 @@ struct FrontDoor: View {
             .buttonStyle(.accessoryBar)
             Spacer()
         }
+    }
+
+    /// Reading “that’s three tickets: …” into an editable list. Classification, not a prompt:
+    /// the list is the words they used, and Name Batch is what sends them.
+    private var classified: Bool {
+        BatchNaming.shortLabels(in: model.field).count >= 2
     }
 
     private func canGenerate(_ brainDump: String) -> Bool {

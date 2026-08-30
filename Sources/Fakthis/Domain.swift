@@ -305,6 +305,13 @@ public struct Batch: Equatable, Sendable {
         self.duplicates = duplicates
         self.id = id
     }
+
+    /// Siblings in `blocks` order when links are on; declaration order when the PM chose no
+    /// links. The rail walks this so it is not mapping a strip onto a list.
+    public var inChainOrder: [BatchSibling] {
+        if blocks.isEmpty { return siblings }
+        return blocks.compactMap { id in siblings.first { $0.id == id } }
+    }
 }
 
 public struct BatchDuplicate: Equatable, Sendable {

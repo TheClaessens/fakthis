@@ -649,6 +649,46 @@ import Fakthis
     #expect(submitted.batch == nil)
 }
 
+@Test func pasteKeyFromABatchDuplicateAbandonsTheBatchAndOpensRewrite() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+    await harness.jira.seed(
+        epics: [],
+        issues: [
+            SeededIssue(
+                key: "FAK-231",
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                labels: [],
+                parentEpicKey: nil,
+                status: "To Do",
+                created: Date(),
+                body: "Live body as Material",
+                comments: ["a comment"]
+            )
+        ],
+        componentNames: []
+    )
+    _ = try await harness.generateTwoSiblingBatch()
+    let rewritten = try await harness.session.perform(.pasteKey("FAK-231"))
+    #expect(rewritten.batch == nil)
+    #expect(rewritten.rewrite?.liveDescription == "Live body as Material")
+    #expect(rewritten.draft?.key == TicketKey("FAK-231"))
+}
+
 @Test func restartingSessionRestoresTheBatchAndFocusedDraft() async throws {
     let harness = Harness()
     let ids = try await harness.generateTwoSiblingBatch()

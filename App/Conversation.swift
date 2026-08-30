@@ -89,7 +89,17 @@ struct ConversationColumn: View {
                     ForEach(Array(model.transcript.enumerated()), id: \.offset) { _, line in
                         turn(line)
                     }
-                    if let hit = model.duplicateInterrupt {
+                    if !model.batchDuplicates.isEmpty {
+                        BatchDuplicateInterrupt(
+                            duplicates: model.batchDuplicates,
+                            working: model.working,
+                            continueBatch: { await model.perform(.dismissDuplicate) },
+                            workOn: { hit in
+                                guard let key = hit.key else { return }
+                                await model.pasteKey(key.value)
+                            }
+                        )
+                    } else if let hit = model.duplicateInterrupt {
                         DuplicateInterrupt(
                             hit: hit,
                             working: model.working,
@@ -112,6 +122,9 @@ struct ConversationColumn: View {
                 withAnimation { scroll.scrollTo(foot, anchor: .bottom) }
             }
             .onChange(of: model.duplicateInterrupt) { _, _ in
+                withAnimation { scroll.scrollTo(foot, anchor: .bottom) }
+            }
+            .onChange(of: model.batchDuplicates.count) { _, _ in
                 withAnimation { scroll.scrollTo(foot, anchor: .bottom) }
             }
             .onAppear { scroll.scrollTo(foot, anchor: .bottom) }
@@ -168,19 +181,40 @@ struct ConversationColumn: View {
                     HStack {
                         SpeakHold(model: model)
                         Spacer()
-                        Button {
-                            Task { await model.send() }
-                        } label: {
-                            Label("Send", systemImage: "arrow.up.circle.fill")
+                        if model.needsGenerate {
+                            Button {
+                                Task { await model.generate() }
+                            } label: {
+                                Label("Generate", systemImage: "sparkles")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.return, modifiers: .command)
+                            .disabled(model.working)
+                        } else {
+                            Button {
+                                Task { await model.send() }
+                            } label: {
+                                Label("Send", systemImage: "arrow.up.circle.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.return, modifiers: .command)
+                            .disabled(!canSend(text.wrappedValue))
                         }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(!canSend(text.wrappedValue))
+                    }
+
+                    if classified, model.batch == nil, model.rewrite == nil {
+                        NameBatchForm(model: model, fromExistingDraft: true)
                     }
                 }
                 .padding(12)
             }
         }
+    }
+
+    /// Reading “that’s three tickets: …” in chat, after a Draft exists. The list is the
+    /// conversion; Name Batch is what sends it.
+    private var classified: Bool {
+        BatchNaming.shortLabels(in: model.field).count >= 2
     }
 
     private func canSend(_ text: String) -> Bool {

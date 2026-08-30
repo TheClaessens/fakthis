@@ -1216,6 +1216,12 @@ public actor Session {
             rewriteError = "\(key.value) is an epic"
             return
         }
+        // Rewrite and Batch are never on screen together: the rail holds one of them.
+        // Working on a duplicate key from a Batch is leaving that grouping for the live Ticket.
+        if batch != nil {
+            try deleteBatchFile()
+            batch = nil
+        }
         showLive(target)
         material = liveMaterial()
         transcript = []
