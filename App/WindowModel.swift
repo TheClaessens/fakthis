@@ -21,6 +21,10 @@ final class WindowModel {
     /// exactly as it was and the PM retries — but a press that does nothing at all is worse than
     /// the failure, so the window says it.
     private(set) var submitRefused = false
+    /// Set when a Jira project key came back without a proposal. §15 leaves the app exactly as
+    /// it was when Jira does not answer — but, as with Submit, a press that does nothing at all
+    /// is worse than the failure, so the window says it.
+    private(set) var projectKeyRefused = false
     private(set) var failure: String?
 
     private let session: Session
@@ -37,7 +41,44 @@ final class WindowModel {
 
     func perform(_ intent: Session.Intent) async {
         submitRefused = false
+        projectKeyRefused = false
         await run { try await $0.perform(intent) }
+    }
+
+    // MARK: - Setup and the Project list
+
+    /// First launch. Both secrets go to Keychain and the rest to `settings.json`; `Session` is
+    /// what splits them, so the window hands over all six and reads back what it kept.
+    func saveCredentials(_ settings: Settings, jiraToken: String, modelKey: String) async {
+        await whileWorking {
+            await perform(
+                .saveCredentials(settings, jiraToken: jiraToken, modelKey: modelKey)
+            )
+        }
+    }
+
+    /// A Jira project key. It is a round trip — Fakthis asks the site what issue types the
+    /// project has (§3.2) — so it waits, and says so if nothing came back.
+    func enterProjectKey(_ key: String) async {
+        await whileWorking { await perform(.enterProjectKey(key)) }
+        projectKeyRefused = proposedProject == nil
+    }
+
+    /// Confirming the mapping creates the Project and takes its first Catalog pull, so this is
+    /// the second round trip in adding one.
+    func confirmProject(mapping: [TicketType: String]) async {
+        await whileWorking { await perform(.confirmProject(mapping: mapping)) }
+    }
+
+    /// `Transcriber.compileStatus()` is a question, not a signal, so the setup screen asks it
+    /// until the answer changes. It is the one thing in the window that moves without the PM
+    /// pressing anything.
+    func waitForANECompile() async {
+        repeat {
+            await open()
+            if !aneCompileInProgress { return }
+            try? await Task.sleep(for: .milliseconds(400))
+        } while !Task.isCancelled && failure == nil
     }
 
     /// A keystroke in the field, whichever surface is drawing it. Not named for the brain-dump:
@@ -93,7 +134,7 @@ final class WindowModel {
 
     private func run(_ body: (Session) async throws -> Session.State) async {
         do {
-            state = try await body(session)
+            self.state = try await body(session)
             failure = nil
         } catch {
             failure = String(describing: error)
@@ -134,6 +175,19 @@ final class WindowModel {
     var material: [AttachedMaterial] { state?.material ?? [] }
     var projectKey: String { state?.project?.key ?? "" }
     var hasProject: Bool { state?.project != nil }
+    var settings: Settings? { state?.settings }
+    var aneCompileInProgress: Bool { state?.aneCompileInProgress ?? false }
+    /// Every local Project, and the one being added. Both are `Session`'s: which folders count
+    /// as Projects, and which Jira issue types a project offers, are answers the window reads.
+    var projects: [String] { state?.projects ?? [] }
+    var proposedProject: ProposedProject? { state?.proposedProject }
+    /// Handwritten canonical spellings on the open Project (§5), empty by default.
+    var projectTerms: [String] { state?.project?.terms ?? [] }
+    /// The disclosure that text Material goes to the model provider, while it is outstanding.
+    /// It has two moments and two homes: on the screen that confirms a Project it is part of
+    /// what is being confirmed, and everywhere else it arrives on its own and has to be read.
+    /// Never in the Draft UI.
+    var textMaterialDisclosure: String? { state?.textMaterialDisclosure }
 
     private func structuralWarnings(_ field: StructuralWarning.Field) -> [StructuralWarning] {
         (state?.structuralWarnings ?? []).filter { $0.field == field }

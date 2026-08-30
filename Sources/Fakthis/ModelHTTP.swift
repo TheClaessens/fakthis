@@ -1,38 +1,32 @@
 import Foundation
 
 public actor ModelHTTP: Model {
-    private let endpoint: URL
-    private let modelId: String
-    private let apiKey: @Sendable () async throws -> String
+    private let access: @Sendable () async throws -> ModelAccess
     private let send: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     public init(
-        endpoint: URL = URL(string: "https://api.openai.com/v1/chat/completions")!,
-        modelId: String = "gpt-5.6-luna",
-        apiKey: @escaping @Sendable () async throws -> String,
+        access: @escaping @Sendable () async throws -> ModelAccess,
         send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)
     ) {
-        self.endpoint = endpoint
-        self.modelId = modelId
-        self.apiKey = apiKey
+        self.access = access
         self.send = send
     }
 
     public func complete(system: String, user: String, screenshots: [Material]) async throws -> String {
-        let key: String
+        let access: ModelAccess
         do {
-            key = try await apiKey()
+            access = try await self.access()
         } catch {
             throw ModelFailed()
         }
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: access.endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(access.apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(
             ChatRequest(
-                model: modelId,
+                model: access.modelId,
                 messages: [
                     ChatMessage(role: "system", content: .text(system)),
                     ChatMessage(role: "user", content: .user(text: user, screenshots: screenshots)),

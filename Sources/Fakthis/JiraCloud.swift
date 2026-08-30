@@ -1,20 +1,14 @@
 import Foundation
 
 public actor JiraCloud: Jira {
-    private let host: String
-    private let email: String
-    private let apiToken: @Sendable () async throws -> String
+    private let credentials: @Sendable () async throws -> JiraCredentials
     private let send: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     public init(
-        host: String,
-        email: String,
-        apiToken: @escaping @Sendable () async throws -> String,
+        credentials: @escaping @Sendable () async throws -> JiraCredentials,
         send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)
     ) {
-        self.host = host
-        self.email = email
-        self.apiToken = apiToken
+        self.credentials = credentials
         self.send = send
     }
 
@@ -266,9 +260,10 @@ public actor JiraCloud: Jira {
         method: String,
         query: [URLQueryItem] = []
     ) async throws -> URLRequest {
+        let credentials = try await self.credentials()
         var components = URLComponents()
         components.scheme = "https"
-        components.host = host
+        components.host = credentials.host
         components.path = path
         if !query.isEmpty {
             components.queryItems = query
@@ -282,7 +277,8 @@ public actor JiraCloud: Jira {
         if method != "GET" {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let token = Data("\(email):\(try await apiToken())".utf8).base64EncodedString()
+        let token = Data("\(credentials.email):\(credentials.apiToken)".utf8)
+            .base64EncodedString()
         request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
         return request
     }

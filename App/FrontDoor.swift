@@ -12,6 +12,10 @@ import Fakthis
 struct FrontDoor: View {
     var model: WindowModel
 
+    @State private var showingProjects = false
+    @State private var showingTerms = false
+    @State private var reading = false
+
     var body: some View {
         VStack(spacing: 0) {
             toolbar
@@ -32,6 +36,41 @@ struct FrontDoor: View {
                 }
             }
         }
+        .sheet(isPresented: $showingProjects) {
+            ProjectList(model: model, close: { showingProjects = false })
+        }
+        .sheet(isPresented: $showingTerms) {
+            ProjectTerms(model: model, close: { showingTerms = false })
+        }
+        .alert("Text Material", isPresented: disclosure) {
+            Button("OK") {}
+        } message: {
+            Text(model.textMaterialDisclosure ?? "")
+        }
+    }
+
+    /// The disclosure's second moment: the first text Material added to this Project. It is an
+    /// alert because it is an event — read once, pressed through, gone — and the one thing §3.5
+    /// forbids is a warning that lives on the Draft. The proposal screen carries the first
+    /// moment, so while one is up this does not say the same thing twice.
+    ///
+    /// Dismissing is the acknowledgement, whichever way it is dismissed. `reading` holds the
+    /// alert shut across the round trip to `Session`, because a binding that still reads true
+    /// after SwiftUI closes the alert puts it straight back up.
+    private var disclosure: Binding<Bool> {
+        Binding(
+            get: {
+                model.textMaterialDisclosure != nil && model.proposedProject == nil && !reading
+            },
+            set: { showing in
+                guard !showing else { return }
+                reading = true
+                Task {
+                    await model.perform(.acknowledgeTextMaterialDisclosure)
+                    reading = false
+                }
+            }
+        )
     }
 
     // MARK: - Toolbar
@@ -39,19 +78,39 @@ struct FrontDoor: View {
     /// With no rail before Generate, Batch and Rewrite have nowhere to live, so they are two
     /// toolbar buttons. You choose the surface before you have anything to put on it. Both are
     /// wired by their own tickets.
+    ///
+    /// The Project key is the third: everything that belongs to the Project rather than to this
+    /// Draft — its terms, the other Projects, adding one — hangs off the name of the Project you
+    /// are in, and none of it reaches the Draft column.
     private var toolbar: some View {
         HStack(spacing: 10) {
-            Image(systemName: "square.stack.3d.up.fill")
-                .foregroundStyle(Color.accentColor)
-            Text(model.projectKey).font(.system(size: 13, weight: .semibold))
+            project
             Spacer()
-            Button("Batch", systemImage: "list.bullet.rectangle") {}
-            Button("Improve existing", systemImage: "arrow.triangle.2.circlepath") {}
+            Group {
+                Button("Batch", systemImage: "list.bullet.rectangle") {}
+                Button("Improve existing", systemImage: "arrow.triangle.2.circlepath") {}
+            }
+            .buttonStyle(.accessoryBar)
         }
-        .buttonStyle(.accessoryBar)
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var project: some View {
+        Menu {
+            Button("Project terms…") { showingTerms = true }
+            Divider()
+            Button("Projects…") { showingProjects = true }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "square.stack.3d.up.fill")
+                Text(model.projectKey).font(.system(size: 13, weight: .semibold))
+            }
+        }
+        .menuStyle(.button)
+        .menuIndicator(.visible)
+        .fixedSize()
     }
 
     // MARK: - Composer

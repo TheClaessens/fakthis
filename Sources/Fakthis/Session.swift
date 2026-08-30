@@ -2,6 +2,11 @@ import Foundation
 
 private let catalogStaleAfter: TimeInterval = 60 * 60
 
+/// The one disclosure that text Material goes to the model provider (ADR-0001, §3.5). One
+/// sentence for both of the moments that raise it, so the setup screen and the first attach
+/// cannot end up saying two different things.
+private let textMaterialDisclosure = "Text Material is sent to the model provider."
+
 public actor Session {
     public enum Intent: Sendable {
         case typeBrainDump(String)
@@ -28,6 +33,10 @@ public actor Session {
         case saveCredentials(Settings, jiraToken: String, modelKey: String)
         case enterProjectKey(String)
         case confirmProject(mapping: [TicketType: String])
+        case dismissProposedProject
+        case openProject(String)
+        case editProjectTerms([String])
+        case acknowledgeTextMaterialDisclosure
         case dismissDuplicate
         case workOnDuplicate
         case tickRelated(TicketKey)
@@ -68,7 +77,21 @@ public actor Session {
         public var aneCompileInProgress: Bool
         public var settings: Settings?
         public var project: Project?
+        /// Every local Project, by Jira project key — the list the PM opens one from (§3.3).
+        /// A folder under `projects/` with a `project.json` in it is a Project and nothing else
+        /// is, so a half-written folder never appears as one.
+        public var projects: [String]
         public var proposedProject: ProposedProject?
+        /// The disclosure that text Material goes to the model provider, while the PM has not
+        /// read it yet. It is raised at the two moments #35 names — the Project proposal at
+        /// setup, and the first text Material added to that Project — and at no third one.
+        ///
+        /// §3.5 and `Prototype/FINDINGS.md` 12 say setup-time only; what the prototype actually
+        /// tried and dropped was the Draft UI, in all three variants. So the second moment is
+        /// new and the prohibition it must not break is the tested one: this is something the
+        /// PM reads and is done with, never anything that rests on a Draft. Hence one
+        /// outstanding fact that gets cleared, and not a field on `Draft`.
+        public var textMaterialDisclosure: String?
         public var materialWarnings: [String]
         public var failedUploads: [String]
         /// Field signals: each one names the Draft field it is about, so the window can put it
@@ -100,6 +123,11 @@ public actor Session {
     private let jira: any Jira
     private let transcriber: any Transcriber
     private let secrets: any Secrets
+    /// Told whenever Fakthis learns its settings or is given new ones. The Jira site and the
+    /// model id do not exist when the adapters are built — the PM types them into a window that
+    /// is already running (§3.1) — so this is how what those adapters read catches up. It is
+    /// told before any work that could make a call, so no launch spends a site it hasn't got.
+    private let settingsChanged: @Sendable (Settings?) async -> Void
 
     private var field = ""
     private var draft: Draft?
@@ -111,7 +139,13 @@ public actor Session {
     private var catalogRefreshFailed = false
     private var aneCompileInProgress = true
     private var settings: Settings?
+    private var projectKeys: [String] = []
     private var proposedProject: ProposedProject?
+    /// Whether this Project has already had the disclosure raised by text Material. Kept in
+    /// `project.json` rather than on `Project`, because it is bookkeeping about a Project and
+    /// not something anyone reads off one.
+    private var textMaterialDisclosed = false
+    private var disclosureOutstanding = false
     private var materialWarnings: [String] = []
     private var failedUploads: [String] = []
     private var duplicateInterrupt: DuplicateHit?
@@ -133,13 +167,15 @@ public actor Session {
         model: any Model,
         jira: any Jira,
         transcriber: any Transcriber,
-        secrets: any Secrets
+        secrets: any Secrets,
+        settingsChanged: @escaping @Sendable (Settings?) async -> Void = { _ in }
     ) {
         self.applicationSupport = applicationSupport
         self.model = model
         self.jira = jira
         self.transcriber = transcriber
         self.secrets = secrets
+        self.settingsChanged = settingsChanged
     }
 
     public func state() async throws -> State {
@@ -204,6 +240,16 @@ public actor Session {
             try await enterProjectKey(key)
         case .confirmProject(let mapping):
             try await confirmProject(mapping: mapping)
+        case .dismissProposedProject:
+            proposedProject = nil
+            disclosureOutstanding = false
+        case .openProject(let key):
+            try await openProject(key)
+        case .editProjectTerms(let terms):
+            startBackgroundRefreshIfStale()
+            try editProjectTerms(terms)
+        case .acknowledgeTextMaterialDisclosure:
+            disclosureOutstanding = false
         case .dismissDuplicate:
             duplicateInterrupt = nil
             batch?.duplicates = []
@@ -269,7 +315,7 @@ public actor Session {
 
     private func load() async throws {
         await refreshCompileStatus()
-        try loadSettingsFromDiskIfNeeded()
+        try await loadSettingsFromDiskIfNeeded()
         try loadProjectFromDiskIfNeeded()
         try loadDraftIfMissing()
         try loadCatalogFromDiskIfNeeded()
@@ -283,8 +329,26 @@ public actor Session {
         guard !aneCompileInProgress else { return }
         try await secrets.storeJiraToken(jiraToken)
         try await secrets.storeModelKey(modelKey)
+        var settings = settings
+        settings.site = Self.hostname(settings.site)
         self.settings = settings
         try persistSettings()
+        await settingsChanged(settings)
+    }
+
+    /// `Settings.site` is both the host every Jira call is made against and the `/browse/` link
+    /// a developer opens (§3.1), so it has to be a hostname. A PM pastes the address out of the
+    /// browser, scheme and trailing path and all; that is the same site, and refusing it would
+    /// be Fakthis being right about a form instead of right about Jira.
+    private static func hostname(_ typed: String) -> String {
+        var host = typed.trimmingCharacters(in: .whitespaces)
+        for scheme in ["https://", "http://"] where host.hasPrefix(scheme) {
+            host = String(host.dropFirst(scheme.count))
+        }
+        if let slash = host.firstIndex(of: "/") {
+            host = String(host[..<slash])
+        }
+        return host
     }
 
     private func enterProjectKey(_ key: String) async throws {
@@ -293,6 +357,11 @@ public actor Session {
         do {
             types = try await jira.fetchIssueTypes(projectKey: key)
         } catch is JiraUnreachable {
+            // A key Jira will not answer for and a key Jira does not have come back the same
+            // way: no proposal, nothing added, the app exactly as it was (§15). A mistyped key
+            // is the likelier of the two and is not a reason to lose the window.
+            return
+        } catch is JiraHTTPError {
             return
         }
         let standard = types.filter(\.isStandard)
@@ -301,18 +370,50 @@ public actor Session {
             mapping: TicketType.mapping(from: types),
             standardJiraIssueTypes: standard.map(\.name)
         )
+        disclosureOutstanding = true
     }
 
+    /// The proposal becomes the Project the PM works in. Adding a Project is also a switch away
+    /// from the one that was open, so everything the old Project's folder put in memory goes
+    /// first — otherwise the new Project would open on the last one's Catalog, and its own first
+    /// pull (§3.2) would be skipped as already done.
     private func confirmProject(mapping: [TicketType: String]) async throws {
         guard let proposedProject, settings != nil, !aneCompileInProgress else { return }
-        project = Project(
-            key: proposedProject.key,
-            ticketTypeMapping: mapping,
-            terms: []
-        )
+        let key = proposedProject.key
+        closeProject()
+        project = Project(key: key, ticketTypeMapping: mapping, terms: [])
         self.proposedProject = nil
+        // Confirming is reading it: the disclosure sits on the screen being confirmed.
+        disclosureOutstanding = false
         try persistProject()
+        projectKeys = projectKeysOnDisk()
+        try recordOpenProject(key)
         try await pullCatalogIfNeverPulled()
+    }
+
+    /// The Project the PM chose from the list. A Project owns its Drafts, its Material, its
+    /// Catalog and its terms, so opening another one is closing this one: nothing loaded from
+    /// the old folder may still be in hand when the new one is read.
+    private func openProject(_ key: String) async throws {
+        guard key != project?.key, projectKeys.contains(key) else { return }
+        closeProject()
+        try readProject(key)
+        try recordOpenProject(key)
+        try await load()
+        startBackgroundRefreshIfStale()
+    }
+
+    /// Handwritten canonical spellings, edited on the Project (§5). Blank lines are not terms:
+    /// an empty string would take a slot in the transcriber's boost list and bias nothing, and
+    /// deciding that is `Session`'s, not something a terms editor gets to have an opinion about.
+    private func editProjectTerms(_ terms: [String]) throws {
+        guard var project else { return }
+        project.terms =
+            terms
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        self.project = project
+        try persistProject()
     }
 
     private func persistProject() throws {
@@ -322,7 +423,8 @@ public actor Session {
         encoder.outputFormatting = [.sortedKeys]
         let file = ProjectFile(
             ticketTypeMapping: project.ticketTypeMapping,
-            terms: project.terms
+            terms: project.terms,
+            textMaterialDisclosed: textMaterialDisclosed
         )
         try encoder.encode(file).write(to: folder.appending(component: "project.json"))
     }
@@ -571,13 +673,16 @@ public actor Session {
     private func refreshCatalog() async {
         defer { refreshTask = nil }
         guard let project else { return }
+        let key = project.key
         let pulled: Catalog
         do {
-            pulled = try await jira.pullCatalog(projectKey: project.key)
+            pulled = try await jira.pullCatalog(projectKey: key)
         } catch {
             catalogRefreshFailed = true
             return
         }
+        // The PM opened another Project while this was in flight. Its Catalog is not this one's.
+        guard self.project?.key == key else { return }
         // The flag describes the snapshot in hand. The pull landed, so the snapshot is fresh
         // even if writing it to disk does not work — that is a different failure.
         catalogRefreshFailed = false
@@ -636,6 +741,14 @@ public actor Session {
         } else if !item.isText {
             materialWarnings.append("\(item.filename) is unsupported")
             blockedUploads.insert(item.filename)
+        }
+        // The second of the disclosure's two moments (§3.5, story 14): the first text Material on
+        // this Project. Recorded as soon as it is raised, so it is one warning and not a warning
+        // every time — and recorded on the Project, because the first one was read at its setup.
+        if item.isText, !textMaterialDisclosed {
+            textMaterialDisclosed = true
+            disclosureOutstanding = true
+            try persistProject()
         }
         if draftId == nil {
             draftId = draft?.id ?? UUID().uuidString
@@ -937,6 +1050,12 @@ public actor Session {
     /// Draft's.
     private func newDraft() throws {
         guard isUploadQueue, failedUploads.isEmpty, batch == nil else { return }
+        forgetDraft()
+    }
+
+    /// Everything in hand that belongs to one Draft. Both callers are a clean break from it: the
+    /// PM starting the next Draft after a Submit, and the PM opening another Project.
+    private func forgetDraft() {
         draft = nil
         draftId = nil
         field = ""
@@ -945,12 +1064,33 @@ public actor Session {
         transcript = []
         blockedUploads = []
         materialWarnings = []
+        failedUploads = []
         duplicateInterrupt = nil
         related = []
+        rewrite = nil
         fetched = nil
         rewriteError = nil
         fieldByDraft = [:]
         clearDefinitionOfDoneOffer()
+    }
+
+    /// Everything in hand that came out of one Project's folder. A Project holds its Drafts, its
+    /// Material, its Catalog and its terms, so none of it may survive into the next Project —
+    /// including the flags that say the Catalog has been read and pulled, which is what makes the
+    /// new Project take its own first pull.
+    private func closeProject() {
+        forgetDraft()
+        project = nil
+        textMaterialDisclosed = false
+        catalog = Catalog()
+        catalogLoaded = false
+        catalogPulledAt = nil
+        firstPullFailed = false
+        catalogRefreshFailed = false
+        batch = nil
+        batchLoaded = false
+        namingTurn = ""
+        writtenBlocksLinks = []
     }
 
     private func changeTicketType(_ ticketType: TicketType) async throws {
@@ -1669,12 +1809,13 @@ public actor Session {
     private var projectLoaded = false
     private var settingsLoaded = false
 
-    private func loadSettingsFromDiskIfNeeded() throws {
+    private func loadSettingsFromDiskIfNeeded() async throws {
         if settingsLoaded { return }
         settingsLoaded = true
         let url = applicationSupport.appending(component: "settings.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         settings = try JSONDecoder().decode(Settings.self, from: Data(contentsOf: url))
+        await settingsChanged(settings)
     }
 
     private func persistSettings() throws {
@@ -1690,23 +1831,41 @@ public actor Session {
         )
     }
 
+    /// Fakthis opens where it was last working. A PM with one Project should never have to pick
+    /// it, and a PM with two should not be dropped back into the wrong one every launch — so the
+    /// recorded choice wins, and the first Project on disk is what a fresh install falls back to.
     private func loadProjectFromDiskIfNeeded() throws {
         if projectLoaded { return }
         projectLoaded = true
+        projectKeys = projectKeysOnDisk()
+        guard let key = recordedOpenProject() ?? projectKeys.first else { return }
+        try readProject(key)
+    }
+
+    private func projectKeysOnDisk() -> [String] {
         let root = applicationSupport.appending(component: "projects")
-        guard FileManager.default.fileExists(atPath: root.path) else { return }
-        let folders = try FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )
-        let keys = folders.compactMap { url -> String? in
-            guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        guard
+            let folders = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return [] }
+        return folders.compactMap { url -> String? in
+            guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                FileManager.default.fileExists(
+                    atPath: url.appending(component: "project.json").path
+                )
             else { return nil }
             return url.lastPathComponent
         }.sorted()
-        guard let key = keys.first else { return }
-        let url = root.appending(component: key).appending(component: "project.json")
+    }
+
+    private func readProject(_ key: String) throws {
+        let url = applicationSupport
+            .appending(component: "projects")
+            .appending(component: key)
+            .appending(component: "project.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let file = try JSONDecoder().decode(ProjectFile.self, from: Data(contentsOf: url))
         project = Project(
@@ -1714,6 +1873,30 @@ public actor Session {
             ticketTypeMapping: file.ticketTypeMapping,
             terms: file.terms
         )
+        textMaterialDisclosed = file.textMaterialDisclosed ?? false
+    }
+
+    private var openProjectURL: URL {
+        applicationSupport.appending(component: "open-project.json")
+    }
+
+    private func recordOpenProject(_ key: String) throws {
+        try FileManager.default.createDirectory(
+            at: applicationSupport,
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(OpenProjectFile(key: key)).write(to: openProjectURL)
+    }
+
+    /// A Project that has since been deleted is not an answer, so the fallback takes over.
+    private func recordedOpenProject() -> String? {
+        guard let data = try? Data(contentsOf: openProjectURL),
+            let file = try? JSONDecoder().decode(OpenProjectFile.self, from: data),
+            projectKeys.contains(file.key)
+        else { return nil }
+        return file.key
     }
 
     private func loadStoredDraft() throws -> StoredDraft? {
@@ -2026,6 +2209,13 @@ public actor Session {
     private struct ProjectFile: Codable {
         var ticketTypeMapping: [TicketType: String]
         var terms: [String]
+        /// Absent from a Project written before the disclosure was recorded, which reads back as
+        /// "not yet disclosed" — the safe direction for a warning.
+        var textMaterialDisclosed: Bool?
+    }
+
+    private struct OpenProjectFile: Codable {
+        var key: String
     }
 
     private struct StoredDraft {
@@ -2181,7 +2371,9 @@ public actor Session {
             aneCompileInProgress: aneCompileInProgress,
             settings: settings,
             project: project,
+            projects: projectKeys,
             proposedProject: proposedProject,
+            textMaterialDisclosure: disclosureOutstanding ? textMaterialDisclosure : nil,
             materialWarnings: materialWarnings,
             failedUploads: failedUploads,
             structuralWarnings: structuralWarningsForSnapshot(),

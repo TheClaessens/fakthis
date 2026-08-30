@@ -2,61 +2,52 @@ import SwiftUI
 import AppKit
 import Fakthis
 
-/// One window. Before Generate it is the front door; Generate reveals the workbench. They are not
-/// two windows and not two modes — they are the same window before and after there is a Draft.
+/// One window, and everything before it. First launch collects the credentials, the Project list
+/// opens a Project, and from there the window is the front door until Generate reveals the
+/// workbench. They are not separate windows and not modes — they are what one window is with
+/// nothing set up, with nothing open, and with a Draft in hand.
 struct FakthisWindow: View {
     @State private var model: WindowModel?
-    @State private var failure: String?
 
     var body: some View {
         Group {
             // A throw here is not an unreachable Jira or a failed Generate — `Session` keeps the
-            // Draft through those (§15). It means Fakthis cannot read its own files, and there is
-            // nothing to render.
-            if let broken = failure ?? model?.failure {
+            // Draft through those (§15). It means Fakthis cannot read its own files or its own
+            // Keychain items, and there is nothing to render.
+            if let broken = model?.failure {
                 ContentUnavailableView(
                     "Fakthis could not open",
                     systemImage: "exclamationmark.triangle",
                     description: Text(broken)
                 )
-            } else if let model, model.hasProject {
-                if let draft = model.draft {
-                    Workbench(model: model, draft: draft)
-                } else {
-                    FrontDoor(model: model)
-                }
+            } else if let model {
+                surface(model)
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task {
             guard model == nil else { return }
-            let session = FixtureProject.session()
-            do {
-                _ = try await FixtureProject.open(session)
-            } catch {
-                failure = String(describing: error)
-                return
-            }
-            let model = WindowModel(session: session)
+            let model = WindowModel(session: Live.open())
             await model.open()
-            if FixtureProject.signalsOnOpen, model.material.isEmpty {
-                for item in FixtureProject.signalMaterial {
-                    await model.perform(.attachMaterial(item))
-                }
-            }
-            if FixtureProject.generateOnOpen, model.draft == nil {
-                await model.type(FixtureProject.brainDump)
-                await model.generate()
-            }
-            if FixtureProject.editDescriptionOnOpen, let draft = model.draft {
-                await model.perform(
-                    .editDescription(draft.description + FixtureProject.editedSentence)
-                )
-                await model.perform(.finishEditingDescription)
-            }
-            if FixtureProject.submitOnOpen { await model.submit() }
             self.model = model
+        }
+    }
+
+    /// The order is what has to exist before the next thing can: credentials before a Project,
+    /// a Project before a Draft. Adding a Project is also reachable from a Project that is
+    /// already open, and there the list is a sheet the front door raises rather than a surface
+    /// that replaces it.
+    @ViewBuilder
+    private func surface(_ model: WindowModel) -> some View {
+        if model.settings == nil {
+            Setup(model: model)
+        } else if !model.hasProject {
+            ProjectList(model: model)
+        } else if let draft = model.draft {
+            Workbench(model: model, draft: draft)
+        } else {
+            FrontDoor(model: model)
         }
     }
 }

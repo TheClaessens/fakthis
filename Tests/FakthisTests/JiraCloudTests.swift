@@ -12,9 +12,13 @@ import Fakthis
     }
     let token = Token()
     let jira = JiraCloud(
-        host: "faktion.atlassian.net",
-        email: "pm@faktion.com",
-        apiToken: { await token.value },
+        credentials: {
+            JiraCredentials(
+                host: "faktion.atlassian.net",
+                email: "pm@faktion.com",
+                apiToken: await token.value
+            )
+        },
         send: { try await http.send($0) }
     )
 
@@ -431,9 +435,7 @@ import Fakthis
 
 @Test func jiraCloudMapsTransportFailureToUnreachable() async throws {
     let jira = JiraCloud(
-        host: "faktion.atlassian.net",
-        email: "pm@faktion.com",
-        apiToken: { "secret-token" },
+        credentials: { testCredentials },
         send: { _ in throw URLError(.cannotFindHost) }
     )
     await #expect(throws: JiraUnreachable.self) {
@@ -466,11 +468,15 @@ actor ScriptedHTTP {
     }
 }
 
+private let testCredentials = JiraCredentials(
+    host: "faktion.atlassian.net",
+    email: "pm@faktion.com",
+    apiToken: "secret-token"
+)
+
 private func jiraCloud(_ http: ScriptedHTTP) -> JiraCloud {
     JiraCloud(
-        host: "faktion.atlassian.net",
-        email: "pm@faktion.com",
-        apiToken: { "secret-token" },
+        credentials: { testCredentials },
         send: { try await http.send($0) }
     )
 }

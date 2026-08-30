@@ -2,6 +2,14 @@ import Foundation
 import Testing
 import Fakthis
 
+/// What first launch leaves behind: an OpenAI endpoint, §13's pinned alias, and the key out of
+/// Keychain. The adapter reads it at the call, so every test hands back the same one.
+private let testAccess = ModelAccess(
+    endpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
+    modelId: "gpt-5.6-luna",
+    apiKey: "test-model-key"
+)
+
 @Test func modelHTTPCompletePostsChatCompletionsWithBearerAndNoTools() async throws {
     let http = ScriptedHTTP()
     await http.queue(
@@ -9,7 +17,7 @@ import Fakthis
         json: try chatCompletionJSON(content: #"{"ok":true}"#)
     )
     let model = ModelHTTP(
-        apiKey: { "test-model-key" },
+        access: { testAccess },
         send: { try await http.send($0) }
     )
 
@@ -41,7 +49,7 @@ import Fakthis
         json: try chatCompletionJSON(content: #"{"ok":true}"#)
     )
     let model = ModelHTTP(
-        apiKey: { "test-model-key" },
+        access: { testAccess },
         send: { try await http.send($0) }
     )
     let png = Data("png-bytes".utf8)
@@ -70,7 +78,7 @@ import Fakthis
     struct MissingKey: Error {}
     let http = ScriptedHTTP()
     let model = ModelHTTP(
-        apiKey: { throw MissingKey() },
+        access: { throw MissingKey() },
         send: { try await http.send($0) }
     )
 
@@ -82,7 +90,7 @@ import Fakthis
 
 @Test func modelHTTPMapsTransportFailureToModelFailed() async throws {
     let model = ModelHTTP(
-        apiKey: { "test-model-key" },
+        access: { testAccess },
         send: { _ in throw URLError(.cannotFindHost) }
     )
     await #expect(throws: ModelFailed.self) {

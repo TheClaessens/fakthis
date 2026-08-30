@@ -1801,10 +1801,7 @@ import Fakthis
     ])
     _ = try await harness.session.perform(firstLaunchCredentials)
     let proposal = try await harness.session.perform(.enterProjectKey("FAK"))
-    #expect(
-        proposal.proposedProject?.textMaterialWarning
-            == "Text Material is sent to the model provider."
-    )
+    #expect(proposal.textMaterialDisclosure == "Text Material is sent to the model provider.")
     let overridden: [TicketType: String] = [
         .story: "Story",
         .bug: "Bug",
@@ -3843,10 +3840,12 @@ private struct Harness {
         root.appending(component: "settings.json")
     }
 
-    var projectJSONURL: URL {
+    var projectJSONURL: URL { projectJSONURL("FAK") }
+
+    func projectJSONURL(_ key: String) -> URL {
         root
             .appending(component: "projects")
-            .appending(component: "FAK")
+            .appending(component: key)
             .appending(component: "project.json")
     }
 
@@ -3893,13 +3892,16 @@ private struct Harness {
         }
     }
 
-    func reopen() -> Session {
+    func reopen(
+        settingsChanged: @escaping @Sendable (Settings?) async -> Void = { _ in }
+    ) -> Session {
         Session(
             applicationSupport: root,
             model: model,
             jira: jira,
             transcriber: transcriber,
-            secrets: secrets
+            secrets: secrets,
+            settingsChanged: settingsChanged
         )
     }
 
@@ -4011,6 +4013,7 @@ private struct Harness {
 private struct DiskProject: Codable {
     var ticketTypeMapping: [TicketType: String]
     var terms: [String]
+    var textMaterialDisclosed: Bool?
 }
 
 // MARK: - #30 Session.State carries what a window needs
@@ -4086,11 +4089,9 @@ private struct DiskProject: Codable {
     try await waitUntil { try await harness.session.state().catalogRefreshFailed == false }
 }
 
-@Test func theProviderWarningRidesTheProposedProjectAndAttachingTextMaterialNeverRaisesIt()
-    async throws
-{
-    // Setup-time only, at Project confirmation (§3.5). It rides the proposal the PM is being
-    // asked to confirm, so it is read once and has nowhere to reappear in the Draft.
+@Test func theProviderDisclosureIsRaisedAtSetupAndAgainAtTheFirstTextMaterial() async throws {
+    // The two moments §3.5 and story 14 name, and no third. Never in the Draft UI, which is why
+    // it is one outstanding fact on state rather than anything that rests on the Draft.
     let harness = Harness(seedProject: false)
     await harness.jira.seedIssueTypes([
         JiraIssueType(name: "Epic", hierarchyLevel: 1, subtask: false),
@@ -4100,16 +4101,21 @@ private struct DiskProject: Codable {
     ])
     _ = try await harness.session.perform(firstLaunchCredentials)
     let proposed = try await harness.session.perform(.enterProjectKey("FAK"))
-    #expect(
-        proposed.proposedProject?.textMaterialWarning
-            == "Text Material is sent to the model provider."
-    )
+    #expect(proposed.textMaterialDisclosure == "Text Material is sent to the model provider.")
 
+    // Confirming is reading it: the disclosure sits on the screen the PM confirms.
     let confirmed = try await harness.session.perform(
         .confirmProject(mapping: [.story: "Story", .bug: "Bug", .chore: "Chore"])
     )
-    // Confirmation clears the proposal, and with it the only thing that carried the warning.
     #expect(confirmed.proposedProject == nil)
+    #expect(confirmed.textMaterialDisclosure == nil)
+
+    let screenshot = try await harness.session.perform(
+        .attachMaterial(
+            Material(filename: "pick.png", mimeType: "image/png", data: Data("png".utf8))
+        )
+    )
+    #expect(screenshot.textMaterialDisclosure == nil)
 
     let attached = try await harness.session.perform(
         .attachMaterial(
@@ -4120,7 +4126,30 @@ private struct DiskProject: Codable {
             )
         )
     )
-    #expect(attached.material.count == 1)
+    #expect(attached.textMaterialDisclosure == "Text Material is sent to the model provider.")
+
+    let read = try await harness.session.perform(.acknowledgeTextMaterialDisclosure)
+    #expect(read.textMaterialDisclosure == nil)
+
+    let second = try await harness.session.perform(
+        .attachMaterial(
+            Material(
+                filename: "support-ticket.txt",
+                mimeType: "text/plain",
+                data: Data("The picker grabbed from the wrong bin.".utf8)
+            )
+        )
+    )
+    #expect(second.textMaterialDisclosure == nil)
+
+    // It is one warning per Project, not one per launch.
+    let restarted = harness.reopen()
+    let afterRestart = try await restarted.perform(
+        .attachMaterial(
+            Material(filename: "thread.txt", mimeType: "text/plain", data: Data("more".utf8))
+        )
+    )
+    #expect(afterRestart.textMaterialDisclosure == nil)
 }
 
 @Test func aChatAnswerJoinsTheConversationAfterTheQuestionItAnswers() async throws {
@@ -4605,4 +4634,244 @@ private struct DiskProject: Codable {
 
     #expect(focused.draft?.id == otherId)
     #expect(focused.transcript.isEmpty)
+}
+
+// MARK: - #35 Setup, the Project list, and Project terms
+
+@Test func theProjectListIsEveryLocalProjectAndOpeningOneOpensThatProject() async throws {
+    let harness = Harness()
+    try harness.writeProject(
+        Project(key: "PROD", ticketTypeMapping: [.story: "Story"], terms: ["pallet"])
+    )
+    let session = harness.reopen()
+
+    let listed = try await session.state()
+    #expect(listed.projects == ["FAK", "PROD"])
+    #expect(listed.project?.key == "FAK")
+
+    let opened = try await session.perform(.openProject("PROD"))
+    #expect(opened.project?.key == "PROD")
+    #expect(opened.project?.terms == ["pallet"])
+    #expect(opened.projects == ["FAK", "PROD"])
+}
+
+@Test func openingAProjectLeavesTheOtherProjectsDraftAndCatalogBehind() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [CatalogEpic(key: TicketKey("FAK-100"), name: "Picking", status: "To Do")],
+        rows: [],
+        componentNames: []
+    )
+    let generated = try await harness.generateStory()
+    #expect(generated.draft?.title == StoryReply.title)
+
+    try harness.writeProject(
+        Project(key: "PROD", ticketTypeMapping: [.story: "Story"], terms: [])
+    )
+    let session = harness.reopen()
+    #expect(try await session.state().draft?.title == StoryReply.title)
+
+    let switched = try await session.perform(.openProject("PROD"))
+    #expect(switched.draft == nil)
+    #expect(switched.catalog.epics.isEmpty)
+    #expect(switched.field.isEmpty)
+
+    let back = try await session.perform(.openProject("FAK"))
+    #expect(back.draft?.title == StoryReply.title)
+    #expect(back.catalog.epics.count == 1)
+}
+
+@Test func theProjectTheListOpenedIsWhereTheNextLaunchLands() async throws {
+    let harness = Harness()
+    try harness.writeProject(
+        Project(key: "PROD", ticketTypeMapping: [.story: "Story"], terms: [])
+    )
+    let session = harness.reopen()
+    _ = try await session.perform(.openProject("PROD"))
+
+    #expect(try await harness.reopen().state().project?.key == "PROD")
+}
+
+@Test func addingASecondProjectOpensItAndTakesItsOwnFirstCatalogPull() async throws {
+    let harness = Harness(seedProject: false)
+    await harness.jira.seedIssueTypes([
+        JiraIssueType(name: "Story", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Bug", hierarchyLevel: 0, subtask: false),
+        JiraIssueType(name: "Chore", hierarchyLevel: 0, subtask: false),
+    ])
+    await harness.jira.seed(
+        epics: [SeededEpic(key: "FAK-100", name: "Picking", status: "To Do", description: "")],
+        issues: [],
+        componentNames: []
+    )
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    let mapping: [TicketType: String] = [.story: "Story", .bug: "Bug", .chore: "Chore"]
+    _ = try await harness.session.perform(.enterProjectKey("FAK"))
+    let first = try await harness.session.perform(.confirmProject(mapping: mapping))
+    #expect(first.project?.key == "FAK")
+    #expect(first.catalog.epics.count == 1)
+
+    _ = try await harness.session.perform(.enterProjectKey("PROD"))
+    let second = try await harness.session.perform(.confirmProject(mapping: mapping))
+
+    #expect(second.project?.key == "PROD")
+    #expect(second.projects == ["FAK", "PROD"])
+    #expect(await harness.jira.catalogPulls == ["FAK", "PROD"])
+    #expect(second.catalog.epics.count == 1)
+}
+
+@Test func anEmptyCatalogAtProjectCreationOpensTheProjectAndGenerateStillRuns() async throws {
+    let harness = Harness(seedProject: false)
+    await harness.jira.seedIssueTypes([
+        JiraIssueType(name: "Task", hierarchyLevel: 0, subtask: false)
+    ])
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    let proposed = try await harness.session.perform(.enterProjectKey("FAK"))
+    let mapping = try #require(proposed.proposedProject?.mapping)
+    let confirmed = try await harness.session.perform(.confirmProject(mapping: mapping))
+
+    #expect(confirmed.project?.key == "FAK")
+    #expect(confirmed.catalog.rows.isEmpty)
+    #expect(await harness.jira.catalogPulls == ["FAK"])
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    #expect(try await harness.session.perform(.generate).draft?.title == StoryReply.title)
+}
+
+@Test func dismissingAProposedProjectAddsNothing() async throws {
+    let harness = Harness(seedProject: false)
+    await harness.jira.seedIssueTypes([
+        JiraIssueType(name: "Task", hierarchyLevel: 0, subtask: false)
+    ])
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    _ = try await harness.session.perform(.enterProjectKey("FAK"))
+
+    let dismissed = try await harness.session.perform(.dismissProposedProject)
+    #expect(dismissed.proposedProject == nil)
+    #expect(dismissed.projects.isEmpty)
+    #expect(dismissed.project == nil)
+    #expect(dismissed.textMaterialDisclosure == nil)
+}
+
+@Test func theSiteIsKeptAsAHostnameHoweverThePMPastedIt() async throws {
+    let harness = Harness(seedProject: false)
+    let saved = try await harness.session.perform(
+        .saveCredentials(
+            Settings(
+                site: "  https://your-team.atlassian.net/jira/software/projects/FAK/boards/1  ",
+                email: "pm@company.com",
+                provider: "openai",
+                modelId: "gpt-5.6-luna"
+            ),
+            jiraToken: "jira-secret",
+            modelKey: "model-secret"
+        )
+    )
+
+    #expect(saved.settings?.site == "your-team.atlassian.net")
+    #expect(try await harness.reopen().state().settings?.site == "your-team.atlassian.net")
+}
+
+/// The regression the two network adapters are built for: they read the settings at the call,
+/// so a launch that hands them over late makes its own first call without a site and marks the
+/// Catalog refresh failed for no reason.
+@Test func aLaunchHandsOverTheSettingsBeforeItCanSpendThem() async throws {
+    let harness = Harness()
+    _ = try await harness.session.perform(firstLaunchCredentials)
+    try harness.writeCatalog(
+        pulledAt: Date().addingTimeInterval(-3601),
+        epics: [],
+        rows: [],
+        componentNames: []
+    )
+
+    let jira = harness.jira
+    let pullsBeforeHandover = JiraPullsAtHandover()
+    let relaunched = harness.reopen(settingsChanged: { _ in
+        await pullsBeforeHandover.record(await jira.catalogPulls.count)
+    })
+
+    _ = try await relaunched.state()
+    try await waitUntil { await jira.catalogPulls.count == 1 }
+
+    #expect(await pullsBeforeHandover.counts == [0])
+}
+
+/// How much Jira had already been asked for each time the settings were handed over.
+private actor JiraPullsAtHandover {
+    private(set) var counts: [Int] = []
+
+    func record(_ pulls: Int) {
+        counts.append(pulls)
+    }
+}
+
+@Test func aProjectKeyJiraWillNotAnswerForProposesNothingAndLosesNothing() async throws {
+    for refusal in [Refusal.unreachable, .noSuchProject] {
+        let harness = Harness(seedProject: false)
+        if refusal == .unreachable {
+            await harness.jira.seedIssueTypes([
+                JiraIssueType(name: "Task", hierarchyLevel: 0, subtask: false)
+            ])
+            await harness.jira.setUnreachable(true)
+        }
+        _ = try await harness.session.perform(firstLaunchCredentials)
+
+        let refused = try await harness.session.perform(.enterProjectKey("NOPE"))
+        #expect(refused.proposedProject == nil)
+        #expect(refused.projects.isEmpty)
+        #expect(refused.project == nil)
+        #expect(refused.settings != nil)
+    }
+}
+
+private enum Refusal {
+    case unreachable
+    case noSuchProject
+}
+
+@Test func projectTermsStartEmptyAndAreEditedOnTheProject() async throws {
+    let harness = Harness()
+    #expect(try await harness.session.state().project?.terms == [])
+
+    let edited = try await harness.session.perform(
+        .editProjectTerms(["bin", "   ", "  pick screen  "])
+    )
+    #expect(edited.project?.terms == ["bin", "pick screen"])
+
+    let onDisk = try JSONDecoder().decode(
+        DiskProject.self,
+        from: Data(contentsOf: harness.projectJSONURL)
+    )
+    #expect(onDisk.terms == ["bin", "pick screen"])
+    #expect(try await harness.reopen().state().project?.terms == ["bin", "pick screen"])
+}
+
+@Test func editedProjectTermsReachGenerateAsContextAndTheTranscriberAsItsBoostList()
+    async throws
+{
+    let harness = Harness()
+    _ = try await harness.session.perform(.editProjectTerms(["bin", "pick screen"]))
+
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    #expect(await harness.transcriber.boostLists == [["bin", "pick screen"]])
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    _ = try await harness.session.perform(.generate)
+    let system = try #require(await harness.model.completeRequests.first?.system)
+    #expect(system.contains("Project terms:\nbin\npick screen"))
+}
+
+@Test func clearingProjectTermsTurnsBiasingOffRatherThanBiasingOnNothing() async throws {
+    let harness = Harness(terms: ["bin"])
+    _ = try await harness.session.perform(.editProjectTerms([]))
+    #expect(try await harness.session.state().project?.terms == [])
+
+    await harness.transcriber.enqueueTake("scan the bin")
+    _ = try await harness.session.perform(.startListening)
+    _ = try await harness.session.perform(.stopListening)
+    #expect(await harness.transcriber.boostLists == [[]])
 }

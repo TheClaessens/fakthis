@@ -271,6 +271,8 @@ actor FakeJira: Jira {
 
     func fetchIssueTypes(projectKey: String) async throws -> [JiraIssueType] {
         if unreachable { throw JiraUnreachable() }
+        // What Jira answers for a project key it does not have, which is what a typo is.
+        guard !seededIssueTypes.isEmpty else { throw JiraHTTPError(statusCode: 404) }
         return seededIssueTypes
     }
 

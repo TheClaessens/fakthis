@@ -4,6 +4,21 @@ public protocol Model: Sendable {
     func complete(system: String, user: String, screenshots: [Material]) async throws -> String
 }
 
+/// Where a completion goes and what signs it: the provider's endpoint, the model id to ask for,
+/// and the API key (§3.1, ADR-0001). None of it exists until the PM has been through first
+/// launch, so it is read at the call rather than held from construction.
+public struct ModelAccess: Sendable {
+    public var endpoint: URL
+    public var modelId: String
+    public var apiKey: String
+
+    public init(endpoint: URL, modelId: String, apiKey: String) {
+        self.endpoint = endpoint
+        self.modelId = modelId
+        self.apiKey = apiKey
+    }
+}
+
 public protocol Transcriber: Sendable {
     func compileStatus() async -> CompileStatus
     func beginTake() async
@@ -34,6 +49,21 @@ public protocol Secrets: Sendable {
 
 public struct SecretAccessFailed: Error {
     public init() {}
+}
+
+/// The site a Jira call is made against and the account making it (§14, ADR-0002). The three
+/// arrive together — hostname and email from settings, the token from Keychain — and, like
+/// `ModelAccess`, none of them exists before first launch.
+public struct JiraCredentials: Equatable, Sendable {
+    public var host: String
+    public var email: String
+    public var apiToken: String
+
+    public init(host: String, email: String, apiToken: String) {
+        self.host = host
+        self.email = email
+        self.apiToken = apiToken
+    }
 }
 
 public protocol Jira: Sendable {

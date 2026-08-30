@@ -65,14 +65,6 @@ public struct ProposedProject: Equatable, Sendable {
     public var mapping: [TicketType: String]
     public var standardJiraIssueTypes: [String]
 
-    /// The one disclosure that text Material goes to the model provider (ADR-0001, §3.5).
-    /// It belongs to the proposal the PM confirms, not to the Draft. Instance-scoped on purpose:
-    /// it lives exactly as long as the unconfirmed proposal does, and `Session` clears
-    /// `proposedProject` at confirmation — so no Draft, and no later moment, can reach it.
-    public var textMaterialWarning: String {
-        "Text Material is sent to the model provider."
-    }
-
     public init(key: String, mapping: [TicketType: String], standardJiraIssueTypes: [String]) {
         self.key = key
         self.mapping = mapping
