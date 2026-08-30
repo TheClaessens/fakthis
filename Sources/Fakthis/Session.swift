@@ -106,6 +106,11 @@ public actor Session {
         /// silently — and re-arm, so Keep followed by another edit offers it again.
         public var offerRegenerateDefinitionOfDone: Bool
         public var duplicateInterrupt: DuplicateHit?
+        /// The same hit, after Continue. A duplicate is a conversation event that leaves a
+        /// gutter mark (§10): the interrupt is the event, this is the mark, and they are never
+        /// both set. It is not a Draft signal — the window rests it in the gutter without
+        /// listing it in the panel.
+        public var duplicateMark: DuplicateHit?
         public var related: [RelatedHit]
         public var status: Status
         public var rewrite: Rewrite?
@@ -149,6 +154,7 @@ public actor Session {
     private var materialWarnings: [String] = []
     private var failedUploads: [String] = []
     private var duplicateInterrupt: DuplicateHit?
+    private var duplicateMark: DuplicateHit?
     private var related: [RelatedHit] = []
     private var status: Status = .yourTurn
     private var rewrite: Rewrite?
@@ -251,6 +257,7 @@ public actor Session {
         case .acknowledgeTextMaterialDisclosure:
             disclosureOutstanding = false
         case .dismissDuplicate:
+            duplicateMark = duplicateInterrupt
             duplicateInterrupt = nil
             batch?.duplicates = []
         case .workOnDuplicate:
@@ -1066,6 +1073,7 @@ public actor Session {
         materialWarnings = []
         failedUploads = []
         duplicateInterrupt = nil
+        duplicateMark = nil
         related = []
         rewrite = nil
         fetched = nil
@@ -1515,6 +1523,7 @@ public actor Session {
         switch duplicateInterrupt {
         case .catalog(let key, _, _):
             duplicateInterrupt = nil
+            duplicateMark = nil
             try await pasteKey(key.value)
         case .localDraft(let id, _, _):
             guard let folder = draftsRoot()?.appending(component: id),
@@ -1530,6 +1539,7 @@ public actor Session {
             material = try loadMaterial()
             try refreshMatches()
             duplicateInterrupt = nil
+            duplicateMark = nil
         case nil:
             return
         }
@@ -1612,6 +1622,7 @@ public actor Session {
     private func refreshMatches() throws {
         let ticked = Set(related.filter(\.ticked).map(\.key))
         duplicateInterrupt = nil
+        duplicateMark = nil
         related = []
         guard let draft else { return }
 
@@ -1682,6 +1693,7 @@ public actor Session {
             .map(\.hit)
         if batch != nil {
             duplicateInterrupt = nil
+            duplicateMark = nil
             try refreshBatchDuplicates()
         }
     }
@@ -2380,6 +2392,7 @@ public actor Session {
             draftSignals: draftSignalsForSnapshot(),
             offerRegenerateDefinitionOfDone: offerRegenerateDefinitionOfDone && draft != nil,
             duplicateInterrupt: duplicateInterrupt,
+            duplicateMark: duplicateMark,
             related: related,
             status: status,
             rewrite: rewrite,

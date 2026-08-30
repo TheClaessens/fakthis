@@ -81,12 +81,25 @@ struct DefinitionOfDoneOffer: View {
 /// from the gutter without opening the panel and taking width off the Draft to read one line.
 /// Pressing a mark opens the panel, which is the only thing the panel is for: the ones that carry
 /// an action, and the ones there are too many of to read one hover at a time.
+///
+/// A continued duplicate also rests here, as a mark that is **not** a signal: it does not open
+/// the panel and it is never listed in it. The interrupt in the conversation is the other home;
+/// Session never sets both at once.
 struct SignalGutter: View {
     var signals: [DraftSignal]
+    var duplicateMark: DuplicateHit?
     @Binding var open: Bool
 
     var body: some View {
         VStack(spacing: 6) {
+            if let hit = duplicateMark {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .frame(width: 22, height: 22)
+                    .help(hit.markText)
+                    .accessibilityLabel(hit.markText)
+            }
             ForEach(signals) { signal in
                 Button {
                     open = true

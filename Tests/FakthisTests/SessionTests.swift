@@ -2271,6 +2271,41 @@ import Fakthis
     #expect(await harness.jira.blocksLinks.isEmpty)
 }
 
+@Test func continuingADuplicateCollapsesItToAGutterMarkAndNeverASignalRow() async throws {
+    let harness = Harness()
+    try harness.writeCatalog(
+        pulledAt: Date(),
+        epics: [],
+        rows: [
+            CatalogRow(
+                key: TicketKey("FAK-231"),
+                title: StoryReply.title,
+                jiraIssueType: "Story",
+                shortLabel: StoryReply.shortLabel,
+                ticketType: .story
+            )
+        ],
+        componentNames: []
+    )
+
+    _ = try await harness.session.perform(.typeBrainDump(StoryReply.brainDump))
+    let generated = try await harness.session.perform(.generate)
+    let hit = try #require(generated.duplicateInterrupt)
+    #expect(generated.duplicateMark == nil)
+    #expect(!generated.draftSignals.contains { $0.text.contains("FAK-231") })
+
+    let continued = try await harness.session.perform(.dismissDuplicate)
+    #expect(continued.duplicateInterrupt == nil)
+    #expect(continued.duplicateMark == hit)
+    #expect(!continued.draftSignals.contains { $0.text.contains("FAK-231") })
+
+    // Rematch at Submit fires the interrupt again. The mark must not stay up beside it.
+    let submitted = try await harness.session.perform(.submit)
+    #expect(submitted.duplicateInterrupt?.key == TicketKey("FAK-231"))
+    #expect(submitted.duplicateMark == nil)
+    #expect(!submitted.draftSignals.contains { $0.text.contains("FAK-231") })
+}
+
 @Test func structuralWarningsDoNotBlockSubmitOrApplyTheCompletenessLabel() async throws {
     let harness = Harness()
     await harness.model.replaceReply(

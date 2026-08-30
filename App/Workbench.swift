@@ -23,12 +23,18 @@ struct Workbench: View {
             ConversationColumn(model: model, collapsed: $conversationCollapsed)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onChange(of: model.duplicateInterrupt) { _, hit in
+            // The interrupt is a conversation event at the moment it fires. A collapsed spine
+            // would hide it, and Continue cannot be pressed from a mark that does not exist yet.
+            if hit != nil { conversationCollapsed = false }
+        }
     }
 
     // MARK: - Rail
 
-    /// On Create the rail holds Material. Related, the sibling list and the live body are what it
-    /// holds on the other surfaces; those are their own tickets.
+    /// On Create the rail holds Material, and Related when there are hits. No hits is no UI,
+    /// not an empty "Related" heading — that is the normal case. The sibling list and the live
+    /// body are what it holds on the other surfaces; those are their own tickets.
     private var rail: some View {
         VStack(alignment: .leading, spacing: 0) {
             ColumnTitle("Material")
@@ -56,10 +62,60 @@ struct Workbench: View {
                 }
                 .padding(.vertical, 4)
             }
+            related
             Spacer(minLength: 0)
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    /// Ignorable, default off as a write. Ticking a key is Context for the next turn; nothing
+    /// is injected into the description and no Jira issue links are written. Session caps at
+    /// three and sends the ticks; the window only draws what is there.
+    @ViewBuilder
+    private var related: some View {
+        if !model.related.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ColumnTitle("Related")
+                ForEach(model.related, id: \.key) { hit in
+                    Button {
+                        Task { await model.perform(.tickRelated(hit.key)) }
+                    } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: hit.ticked ? "checkmark.square.fill" : "square")
+                                .font(.system(size: 12))
+                                .foregroundStyle(
+                                    hit.ticked
+                                        ? Color.accentColor
+                                        : Color(nsColor: .tertiaryLabelColor)
+                                )
+                                .padding(.top, 1)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(hit.key.value)
+                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text(hit.title)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.primary)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!model.editable || model.working)
+                    .accessibilityLabel(
+                        hit.ticked
+                            ? "\(hit.key.value), ticked as Context"
+                            : "\(hit.key.value), \(hit.title)"
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -120,8 +176,12 @@ struct DraftColumn: View {
                         open: $signalsOpen
                     )
                 }
-                if !model.draftSignals.isEmpty {
-                    SignalGutter(signals: model.draftSignals, open: $signalsOpen)
+                if !model.draftSignals.isEmpty || model.duplicateMark != nil {
+                    SignalGutter(
+                        signals: model.draftSignals,
+                        duplicateMark: model.duplicateMark,
+                        open: $signalsOpen
+                    )
                 }
             }
             .onChange(of: model.draftSignals) { _, signals in

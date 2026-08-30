@@ -89,6 +89,14 @@ struct ConversationColumn: View {
                     ForEach(Array(model.transcript.enumerated()), id: \.offset) { _, line in
                         turn(line)
                     }
+                    if let hit = model.duplicateInterrupt {
+                        DuplicateInterrupt(
+                            hit: hit,
+                            working: model.working,
+                            continueDraft: { await model.perform(.dismissDuplicate) },
+                            workOnThat: { await model.workOnDuplicate() }
+                        )
+                    }
                     if model.working {
                         Text("Thinking…")
                             .font(.system(size: 11))
@@ -101,6 +109,9 @@ struct ConversationColumn: View {
                 .padding(.vertical, 12)
             }
             .onChange(of: model.transcript.count) { _, _ in
+                withAnimation { scroll.scrollTo(foot, anchor: .bottom) }
+            }
+            .onChange(of: model.duplicateInterrupt) { _, _ in
                 withAnimation { scroll.scrollTo(foot, anchor: .bottom) }
             }
             .onAppear { scroll.scrollTo(foot, anchor: .bottom) }
@@ -174,5 +185,64 @@ struct ConversationColumn: View {
 
     private func canSend(_ text: String) -> Bool {
         !model.working && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// The duplicate as a conversation event, at the moment it fires. Continue is always legal and
+/// Submit is never blocked; continuing collapses this to a gutter mark so it is never on screen
+/// in two places. A local Draft is named by its short label; a Jira key offers work-on-that.
+struct DuplicateInterrupt: View {
+    var hit: DuplicateHit
+    var working: Bool
+    var continueDraft: () async -> Void
+    var workOnThat: () async -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Fakthis")
+                .font(.system(size: 9.5, weight: .bold))
+                .tracking(0.6)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.accentColor)
+            Text(hit.interruptText)
+                .font(.system(size: 12))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Continue") { Task { await continueDraft() } }
+                Button("Work on \(hit.looksLike)") { Task { await workOnThat() } }
+                    .disabled(working)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .strokeBorder(Color.orange.opacity(0.45))
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(hit.interruptText)
+    }
+}
+
+extension DuplicateHit {
+    /// A Jira key, or a local Draft's short label — the two names §10 uses.
+    var looksLike: String {
+        switch self {
+        case .catalog(let key, _, _): key.value
+        case .localDraft(_, let shortLabel, _): shortLabel
+        }
+    }
+
+    var interruptText: String {
+        "This looks like \(looksLike). Continue, or work on that Ticket instead."
+    }
+
+    var markText: String {
+        "This looks like \(looksLike)."
     }
 }

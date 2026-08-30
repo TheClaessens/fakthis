@@ -152,6 +152,12 @@ final class WindowModel {
         await whileWorking { await perform(.retryUploads) }
     }
 
+    /// A Jira key lands in the rewrite loop; a local Draft is focused. Either way it is
+    /// `Session`'s landing, and a fetch is a round trip, so this waits the way Generate does.
+    func workOnDuplicate() async {
+        await whileWorking { await perform(.workOnDuplicate) }
+    }
+
     /// The second pass again, over the description the PM edited. A round trip to the agent, so
     /// it waits the way Generate does — and it is a press, never silent (§7.3).
     func regenerateDefinitionOfDone() async {
@@ -217,6 +223,12 @@ final class WindowModel {
     var descriptionWarnings: [StructuralWarning] { structuralWarnings(.description) }
     /// What rests in the gutter. Assembled behind the actor too, for the same reason.
     var draftSignals: [DraftSignal] { state?.draftSignals ?? [] }
+    /// A duplicate while it is an interrupt in the conversation. Continue collapses it to
+    /// `duplicateMark`; they are never both set, and neither is a Draft signal.
+    var duplicateInterrupt: DuplicateHit? { state?.duplicateInterrupt }
+    var duplicateMark: DuplicateHit? { state?.duplicateMark }
+    /// Ignorable, cap three, default off as a write. Empty means no UI — not an empty state.
+    var related: [RelatedHit] { state?.related ?? [] }
     var offerRegenerateDefinitionOfDone: Bool {
         state?.offerRegenerateDefinitionOfDone ?? false
     }
