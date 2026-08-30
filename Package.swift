@@ -7,7 +7,6 @@ let package = Package(
     products: [
         .library(name: "Fakthis", targets: ["Fakthis"]),
         .executable(name: "FakthisApp", targets: ["FakthisApp"]),
-        .executable(name: "FakthisPrototype", targets: ["FakthisPrototype"]),
     ],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.6"),
@@ -37,13 +36,6 @@ let package = Package(
                     "-Xlinker", "App/Info.plist",
                 ])
             ]
-        ),
-        // THROWAWAY. UI-shell prototype, branch prototype/ui-shell. Not shipped.
-        .executableTarget(
-            name: "FakthisPrototype",
-            dependencies: ["Fakthis"],
-            path: "Prototype",
-            exclude: ["Shots"]
         ),
         .testTarget(
             name: "FakthisTests",

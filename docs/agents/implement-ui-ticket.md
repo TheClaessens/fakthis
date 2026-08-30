@@ -83,8 +83,9 @@ seeing it, run the app rather than reasoning about it.
   an implementation decision.
 - **Stay inside the ticket.** Do not build the next surface because the layout suggests it.
   A ticket that could absorb its successor should say so in its closing comment instead.
-- **Leave `Prototype/` alone** until #40 retires it. It is the primary source the findings
-  cite.
+- **`Prototype/` is a record, not code.** #40 retired the target and its Swift sources;
+  `FINDINGS.md` and the screenshot folders stay as the reasoning the window's shape came from.
+  Do not add to them, and do not treat a screenshot as newer than the app.
 - **No new dependencies** without saying why in the closing comment.
 
 ## Order

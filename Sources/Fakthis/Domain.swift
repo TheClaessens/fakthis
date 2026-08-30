@@ -4,6 +4,16 @@ public enum TicketType: String, CaseIterable, Sendable, Codable, Equatable {
     case story
     case bug
     case chore
+
+    /// The Ticket type's own name, as the PM reads it. Not the Jira issue type it is mapped
+    /// onto, which is whatever that project happens to call it.
+    public var label: String {
+        switch self {
+        case .story: "Story"
+        case .bug: "Bug"
+        case .chore: "Chore"
+        }
+    }
 }
 
 public struct TicketKey: Hashable, Sendable, Codable {

@@ -34,7 +34,7 @@ struct ProjectList: View {
         .padding(.horizontal, 32)
         .padding(.vertical, 30)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .task { typingKey = true }
     }
 

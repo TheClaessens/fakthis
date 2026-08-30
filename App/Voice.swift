@@ -27,7 +27,7 @@ struct VoiceStrip: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
         }

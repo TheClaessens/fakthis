@@ -36,7 +36,7 @@ struct Setup: View {
             .padding(.vertical, 36)
             .frame(maxWidth: .infinity)
         }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Color.windowGround)
             .task { typingSite = true }
             .task { await model.waitForANECompile() }
     }

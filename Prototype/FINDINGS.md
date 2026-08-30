@@ -3,10 +3,11 @@
 Throwaway prototype, branch `prototype/ui-shell`. Three radically different window shapes bound
 to the real `Session` actor, five scenes each, fifteen screenshots in `Shots/`.
 
-```
-swift run FakthisPrototype           # the window; ⌘[ / ⌘] switch variant, scene buttons drive it
-swift run FakthisPrototype --shoot   # re-render Shots/
-```
+> **Retired by #40.** The `FakthisPrototype` target and its Swift sources have left the package;
+> the window they were asking about is the app. `Shots/` and `Shots2/` are frozen as the record
+> the findings below cite, and the commands that rendered them (`swift run FakthisPrototype`,
+> `--shoot`, `--shoot2`) no longer exist. Read this as the reasoning behind the window's shape,
+> which ADR-0007 and `docs/fakthis-v1.md` now carry as decisions.
 
 The variants:
 

@@ -48,23 +48,10 @@ struct BrainDumpField: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let field = scroll.documentView as? ComposerTextView else { return }
         field.attach = attach
-        // Only when `Session` changed the field out from under the text view — a take the
-        // transcriber appended. Writing on every pass would fight the typing.
-        if field.string != text { field.string = text }
+        PlainTextView.adopt(text, into: field)
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
-
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        private let text: Binding<String>
-
-        init(text: Binding<String>) { self.text = text }
-
-        func textDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextView else { return }
-            text.wrappedValue = field.string
-        }
-    }
+    func makeCoordinator() -> TypingCoordinator { TypingCoordinator(text: $text) }
 }
 
 /// Takes a drop or a paste that carries Material, and leaves everything else to the text view.

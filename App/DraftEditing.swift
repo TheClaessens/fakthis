@@ -71,26 +71,15 @@ struct DescriptionEditor: View {
     var finish: () async -> Void
 
     @State private var editing = false
-    @FocusState private var focused: Bool
 
     var body: some View {
         if editing && editable {
             VStack(alignment: .leading, spacing: 12) {
                 InPlaceEdit(value: draft.description, commit: commit) { text in
-                    TextEditor(text: text)
-                        .font(.system(size: 12.5, design: .monospaced))
-                        .scrollDisabled(true)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 260)
-                        .focused($focused)
+                    DescriptionField(text: text, finished: stopEditing)
                 }
                 openQuestions
             }
-            .onAppear { focused = true }
-            .onChange(of: focused) { _, hasFocus in
-                if !hasFocus { stopEditing() }
-            }
-            .onExitCommand { stopEditing() }
         } else {
             MarkdownBlocks(markdown: draft.descriptionWithOpenQuestions)
                 .font(.system(size: 12.5))

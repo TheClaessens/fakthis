@@ -302,8 +302,8 @@ private struct DiffLine {
     var text: String
 }
 
-/// Line LCS. Same shape as the prototype's throwaway `DiffView`; copied rather than imported,
-/// because `Prototype/` stands until #40.
+/// Line LCS. What "wholesale replace is not silent" (§12) needs and nothing more: the lines the
+/// Update drops, and the lines it writes.
 private func diffLines(from before: String, to after: String) -> [DiffLine] {
     let a = before.components(separatedBy: "\n")
     let b = after.components(separatedBy: "\n")

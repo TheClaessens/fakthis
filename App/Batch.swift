@@ -346,7 +346,7 @@ private struct SiblingControl: View {
                             .textCase(.uppercase)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(Color(nsColor: .windowBackgroundColor))
+                            .background(Color.windowGround)
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     epicMenu
@@ -367,7 +367,7 @@ private struct SiblingControl: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             sibling.id == batch.focusedDraftId
-                ? Color(nsColor: .windowBackgroundColor)
+                ? Color.windowGround
                 : .clear
         )
         .overlay(alignment: .leading) {
@@ -507,7 +507,7 @@ struct Draft1RegenerateOffer: View {
         .disabled(working)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay {
             RoundedRectangle(cornerRadius: 6)
@@ -555,7 +555,7 @@ struct BatchDuplicateInterrupt: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay {
             RoundedRectangle(cornerRadius: 7)

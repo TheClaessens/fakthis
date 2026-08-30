@@ -69,6 +69,11 @@ struct FakthisApp: App {
 
     var body: some Scene {
         WindowGroup("Fakthis") {
+            // The narrowest and shortest the window goes. Width: rail, conversation and the
+            // dividers leave the Draft 636pt of measure, well clear of `WindowShape.draftFloor`,
+            // so the resting three-column shape holds all the way down and only the signal panel
+            // has to trade for its width. Height: enough for the Draft's fixed footer, the
+            // rewrite diff above it and a description worth reading between them.
             FakthisWindow().frame(minWidth: 1240, minHeight: 800)
         }
         .defaultSize(width: 1340, height: 880)

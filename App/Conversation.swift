@@ -72,7 +72,7 @@ struct ConversationColumn: View {
             Divider()
             composer
         }
-        .frame(width: 340)
+        .frame(width: WindowShape.conversation)
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
@@ -147,7 +147,7 @@ struct ConversationColumn: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(Color(nsColor: .windowBackgroundColor))
+                .background(Color.windowGround)
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
     }
@@ -252,7 +252,7 @@ struct DuplicateInterrupt: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay {
             RoundedRectangle(cornerRadius: 7)

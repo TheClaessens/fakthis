@@ -66,7 +66,7 @@ struct DefinitionOfDoneOffer: View {
         .disabled(working)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay {
             RoundedRectangle(cornerRadius: 6)
@@ -117,9 +117,9 @@ struct SignalGutter: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 8)
-        .frame(width: 26)
+        .frame(width: WindowShape.gutter)
         .frame(maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .overlay(alignment: .leading) {
             // The edge, drawn. Without it the marks float in the Draft's own margin and read as
             // decoration on the text rather than as a strip beside it.
@@ -151,7 +151,7 @@ struct SignalPanel: View {
             card
             Spacer(minLength: 0)
         }
-        .frame(width: 250)
+        .frame(width: WindowShape.panel)
     }
 
     private var card: some View {
@@ -164,7 +164,7 @@ struct SignalPanel: View {
         .padding(.horizontal, 11)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay {
             RoundedRectangle(cornerRadius: 7)

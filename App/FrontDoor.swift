@@ -27,7 +27,7 @@ struct FrontDoor: View {
             toolbar
             Divider()
             ZStack {
-                Color(nsColor: .windowBackgroundColor)
+                Color.windowGround
                 Group {
                     if improvingExisting {
                         ImproveExisting(
@@ -207,7 +207,7 @@ struct FrontDoor: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                    .background(Color.windowGround)
                     .clipShape(Capsule())
             }
             Button("Attach", systemImage: "paperclip") {

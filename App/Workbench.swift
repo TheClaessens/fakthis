@@ -1,6 +1,24 @@
 import SwiftUI
 import Fakthis
 
+/// What the window is worth in points, in one place, because the trade between the columns is
+/// arithmetic on these numbers and a second copy of one of them is how a column ends up wider
+/// than the space the surface thinks it took.
+///
+/// The window's minimum width is the first three plus the dividers, so the resting three-column
+/// shape always fits at any size the PM can drag to; only the panel can ask for more than there
+/// is.
+enum WindowShape {
+    static let rail: CGFloat = 262
+    static let conversation: CGFloat = 340
+    static let panel: CGFloat = 250
+    static let gutter: CGFloat = 26
+    static let dividers: CGFloat = 2
+    /// The narrowest the Draft may be measured at. Below this the description wraps to a column
+    /// too narrow to read the prose a developer has to pick the work up from.
+    static let draftFloor: CGFloat = 460
+}
+
 /// What Generate reveals: one window, three columns — rail, Draft, conversation. Create, Batch
 /// and Rewrite are not modes of it; they are what the rail holds, which is why the Draft and the
 /// conversation keep their shape across all three and the Draft is designed once.
@@ -8,11 +26,18 @@ struct Workbench: View {
     var model: WindowModel
     var draft: Draft
 
-    /// Whether the conversation is a spine. The surface owns it rather than the column, because
-    /// Rewrite opens with it already collapsed — Update does not require Generate — and a
-    /// keyboard-only rewrite should not stare at an empty third of the window. Create and Batch
-    /// open it for chat.
-    @State private var conversationCollapsed: Bool
+    /// Whether the PM collapsed the conversation to a spine. The surface owns it rather than the
+    /// column, because Rewrite opens with it already collapsed — Update does not require Generate
+    /// — and a keyboard-only rewrite should not stare at an empty third of the window. Create and
+    /// Batch open it for chat.
+    ///
+    /// It is not the whole answer to whether the spine is showing: a window too narrow to hold
+    /// the conversation and a readable Draft at once collapses it as well. See `collapsed(in:)`.
+    @State private var collapsedByHand: Bool
+    /// The signal panel, up. It belongs to the Draft column and opens from its gutter, but the
+    /// width it takes comes out of the same row as the conversation, so the surface is what holds
+    /// it — the trade between the two is a decision about the window, not about the column.
+    @State private var signalsOpen = false
     /// The control that names a Batch after a Draft exists. Before Generate that control is a
     /// toolbar button on the front door; here it hangs off Material, because there is a rail.
     @State private var namingBatch = false
@@ -20,33 +45,71 @@ struct Workbench: View {
     init(model: WindowModel, draft: Draft) {
         self.model = model
         self.draft = draft
-        _conversationCollapsed = State(initialValue: model.rewrite != nil)
+        _collapsedByHand = State(initialValue: model.rewrite != nil)
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            rail.frame(width: 262)
-            Divider()
-            DraftColumn(model: model, draft: draft)
-                .frame(minWidth: 460, maxWidth: .infinity)
-            Divider()
-            ConversationColumn(model: model, collapsed: $conversationCollapsed)
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                rail.frame(width: WindowShape.rail)
+                Divider()
+                DraftColumn(model: model, draft: draft, signalsOpen: $signalsOpen)
+                    .frame(minWidth: WindowShape.draftFloor, maxWidth: .infinity)
+                Divider()
+                ConversationColumn(model: model, collapsed: collapsed(in: geometry.size.width))
+            }
+            .background(Color.windowGround)
+            .onChange(of: model.duplicateInterrupt) { _, hit in
+                // The interrupt is a conversation event at the moment it fires. A collapsed spine
+                // would hide it, and Continue cannot be pressed from a mark that does not exist
+                // yet.
+                if hit != nil { expandConversation(in: geometry.size.width) }
+            }
+            .onChange(of: model.batchDuplicates.isEmpty) { _, empty in
+                if !empty { expandConversation(in: geometry.size.width) }
+            }
+            .onChange(of: model.rewrite != nil) { _, rewriting in
+                // Duplicate → work-on-that lands in Rewrite on this same Workbench. Init does not
+                // run again, so the collapse has to happen here. Update clearing `rewrite` must
+                // not expand the spine — the PM did not ask for a conversation.
+                if rewriting { collapsedByHand = true }
+            }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .onChange(of: model.duplicateInterrupt) { _, hit in
-            // The interrupt is a conversation event at the moment it fires. A collapsed spine
-            // would hide it, and Continue cannot be pressed from a mark that does not exist yet.
-            if hit != nil { conversationCollapsed = false }
-        }
-        .onChange(of: model.batchDuplicates.isEmpty) { _, empty in
-            if !empty { conversationCollapsed = false }
-        }
-        .onChange(of: model.rewrite != nil) { _, rewriting in
-            // Duplicate → work-on-that lands in Rewrite on this same Workbench. Init does not
-            // run again, so the collapse has to happen here. Update clearing `rewrite` must
-            // not expand the spine — the PM did not ask for a conversation.
-            if rewriting { conversationCollapsed = true }
-        }
+    }
+
+    /// The conversation is a spine when the PM collapsed it, and also when the window is too
+    /// narrow to hold it, the panel and a readable Draft at once. The Draft column is the editor
+    /// and the panel is the temporary state (`Prototype/FINDINGS.md` 16), so what yields is the
+    /// conversation: at the minimum width the panel opens against the spine rather than against
+    /// the description's measure.
+    private func collapsed(in width: CGFloat) -> Binding<Bool> {
+        Binding(
+            get: { collapsedByHand || !conversationFits(in: width) },
+            set: { collapse in
+                if collapse {
+                    collapsedByHand = true
+                } else {
+                    expandConversation(in: width)
+                }
+            }
+        )
+    }
+
+    /// Bringing the conversation back closes the panel if that is what was in its way, so the
+    /// press does what it says on a narrow window instead of nothing.
+    private func expandConversation(in width: CGFloat) {
+        collapsedByHand = false
+        if !conversationFits(in: width) { signalsOpen = false }
+    }
+
+    /// Whether the Draft would still have its floor with the conversation open. It asks about the
+    /// conversation expanded whatever it is doing now, because that is the question both callers
+    /// have: the spine is showing when the answer is no.
+    private func conversationFits(in width: CGFloat) -> Bool {
+        let taken = WindowShape.rail + WindowShape.conversation + WindowShape.dividers
+            + (model.showsGutter ? WindowShape.gutter : 0)
+            + (signalsOpen ? WindowShape.panel : 0)
+        return width - taken >= WindowShape.draftFloor
     }
 
     // MARK: - Rail
@@ -181,9 +244,10 @@ struct DraftColumn: View {
     var draft: Draft
 
     /// The gutter is the resting state and what the window opens with. The panel is temporary,
-    /// and costs the Draft width while it is up (`Prototype/FINDINGS.md` 16), so it closes again
-    /// the moment there is nothing left to rest in the gutter.
-    @State private var signalsOpen = false
+    /// and costs width while it is up (`Prototype/FINDINGS.md` 16), so it closes again the moment
+    /// there is nothing left to rest in the gutter. The surface holds it, because on a narrow
+    /// window the width it takes is the conversation's rather than the Draft's.
+    @Binding var signalsOpen: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -233,7 +297,7 @@ struct DraftColumn: View {
                         open: $signalsOpen
                     )
                 }
-                if !model.draftSignals.isEmpty || model.duplicateMark != nil {
+                if model.showsGutter {
                     SignalGutter(
                         signals: model.draftSignals,
                         duplicateMark: model.duplicateMark,
@@ -278,7 +342,7 @@ struct DraftColumn: View {
                     .textCase(.uppercase)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                    .background(Color.windowGround)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                     .overlay {
                         RoundedRectangle(cornerRadius: 4)
@@ -337,7 +401,7 @@ struct DraftColumn: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.windowGround)
     }
 
     /// One Submit for the Batch. It sits on the Batch, not on the focused Draft — focusing
@@ -463,17 +527,5 @@ struct ColumnTitle<Accessory: View>: View {
 extension ColumnTitle where Accessory == EmptyView {
     init(_ text: String) {
         self.init(text) { EmptyView() }
-    }
-}
-
-/// The Ticket type's own name. It belongs in the library, but the throwaway prototype target
-/// already declares one; it moves there when #40 retires it.
-extension TicketType {
-    var label: String {
-        switch self {
-        case .story: "Story"
-        case .bug: "Bug"
-        case .chore: "Chore"
-        }
     }
 }

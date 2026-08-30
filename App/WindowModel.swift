@@ -91,9 +91,9 @@ final class WindowModel {
     }
 
     /// A keystroke in the field, whichever surface is drawing it. Not named for the brain-dump:
-    /// a later chat answer is not one (`CONTEXT.md`), and it goes into the same field. The
-    /// intent behind it still carries the old name — renaming it would edit `Prototype/`, which
-    /// stands until #40.
+    /// a later chat answer is not one (`CONTEXT.md`), and it goes into the same field. The intent
+    /// behind it still carries the old name, which is a rename `Session` and its tests owe the
+    /// glossary and not a distinction the window is making.
     func type(_ text: String) async {
         await perform(.typeBrainDump(text))
     }
@@ -266,6 +266,9 @@ final class WindowModel {
     var descriptionWarnings: [StructuralWarning] { structuralWarnings(.description) }
     /// What rests in the gutter. Assembled behind the actor too, for the same reason.
     var draftSignals: [DraftSignal] { state?.draftSignals ?? [] }
+    /// Whether the Draft column is showing its gutter. It is what rests there, and it is also
+    /// 26pt the surface has to charge for when it works out whether the conversation still fits.
+    var showsGutter: Bool { !draftSignals.isEmpty || duplicateMark != nil }
     /// A duplicate while it is an interrupt in the conversation. Continue collapses it to
     /// `duplicateMark`; they are never both set, and neither is a Draft signal.
     var duplicateInterrupt: DuplicateHit? { state?.duplicateInterrupt }
